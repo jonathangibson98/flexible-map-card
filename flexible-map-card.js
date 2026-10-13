@@ -28,6 +28,9 @@ class FlexibleMapCard extends LitElement {
     this._holdTimer = null;
     this._holdStart = null;
     this._hideTimer = null;
+    this._observers = [];
+    this._observed = new WeakSet();
+    this._lastLogLen = 0;
   }
 
   static async getConfigElement() {
@@ -63,6 +66,7 @@ class FlexibleMapCard extends LitElement {
     this._mapEl = null;
     this._lastRatio = null;
     this._entitiesKey = "";
+    this._disconnectObservers();
   }
 
   getGridOptions() {
@@ -101,10 +105,12 @@ class FlexibleMapCard extends LitElement {
     const have = new Set(
       configured.map((e) => (typeof e === "string" ? e : e.entity))
     );
+    const registry = this.hass.entities || {};
     const extra = [];
     for (const [id, st] of Object.entries(this.hass.states)) {
-      if (id.startsWith("zone.")) continue; // zones are drawn by the map itself
       if (have.has(id)) continue;
+      // Skip anything you've hidden in the entity registry (like the native card)
+      if (registry[id]?.hidden) continue;
       const a = st.attributes || {};
       if (a.latitude !== undefined && a.longitude !== undefined) extra.push(id);
     }
@@ -165,61 +171,114 @@ class FlexibleMapCard extends LitElement {
     wrapper.innerHTML = "";
     wrapper.appendChild(el);
     this._scheduleHideApply();
+    [400, 1200, 3000].forEach((ms) => setTimeout(() => this._applyHides(), ms));
   }
 
   // ------------------------------------------------------------------------
   // Hiding the zoom / orient buttons
-  // The buttons live inside nested shadow roots, so we inject a <style> tag
-  // into each one. Selectors cover both Leaflet and MapLibre vector maps.
+  // The buttons live inside nested shadow roots, so we walk every shadow root
+  // under the map, hide anything that looks like a zoom or orient control,
+  // and keep watching in case the map re-renders.
   // ------------------------------------------------------------------------
-  _hideCss() {
-    const rules = [];
-    if (this.config?.hide_zoom_controls) {
-      rules.push(
-        ".leaflet-control-zoom, .maplibregl-ctrl-zoom-in, .maplibregl-ctrl-zoom-out, .mapboxgl-ctrl-zoom-in, .mapboxgl-ctrl-zoom-out"
-      );
-    }
-    if (this.config?.hide_orient_buttons) {
-      rules.push(
-        ".maplibregl-ctrl-compass, .maplibregl-ctrl-geolocate, .mapboxgl-ctrl-compass, .reset-button, ha-icon-button.reset-button, .reset-focus, .leaflet-control-reset"
-      );
-    }
-    if (!rules.length) return "";
-    return `${rules.join(",\n")} { display: none !important; }`;
+  _attrText(el) {
+    return [
+      el.getAttribute?.("title"),
+      el.getAttribute?.("aria-label"),
+      el.getAttribute?.("label"),
+      el.label,
+    ]
+      .filter((v) => typeof v === "string")
+      .join(" ")
+      .toLowerCase();
   }
 
-  _injectStyle(root, cssText) {
-    if (!root) return;
-    let tag = root.querySelector("style[data-fmc-hide]");
-    if (!tag) {
-      tag = document.createElement("style");
-      tag.setAttribute("data-fmc-hide", "");
-      root.appendChild(tag);
+  _classText(el) {
+    return (el.getAttribute?.("class") || "").toLowerCase();
+  }
+
+  _hideEl(el) {
+    // If the match lives inside an <ha-icon-button>, hide the whole button
+    const host = el.getRootNode?.()?.host;
+    const target = host && host.localName === "ha-icon-button" ? host : el;
+    target.style.setProperty("display", "none", "important");
+  }
+
+  _isZoom(el) {
+    if (/leaflet-control-zoom|ctrl-zoom|control-zoom/.test(this._classText(el))) {
+      return true;
     }
-    if (tag.textContent !== cssText) tag.textContent = cssText;
+    const clickable =
+      ["a", "button", "ha-icon-button", "mwc-icon-button"].includes(el.localName) ||
+      el.getAttribute?.("role") === "button";
+    return clickable && /\bzoom (in|out)\b/.test(this._attrText(el));
+  }
+
+  _isOrient(el) {
+    if (/compass|geolocate|reset|recenter/.test(this._classText(el))) return true;
+    // The recenter button the native hui-map-card floats over the map
+    const host = el.getRootNode?.()?.host;
+    if (el.localName === "ha-icon-button" && host?.localName === "hui-map-card") {
+      return true;
+    }
+    const clickable =
+      ["a", "button", "ha-icon-button", "mwc-icon-button"].includes(el.localName) ||
+      el.getAttribute?.("role") === "button";
+    return (
+      clickable &&
+      /(north|compass|orient|reset focus|re-?center|reset map)/.test(this._attrText(el))
+    );
+  }
+
+  _walkShadow(root, fn, seen) {
+    if (!root || seen.has(root)) return;
+    seen.add(root);
+    root.querySelectorAll("*").forEach((el) => {
+      fn(el);
+      if (el.shadowRoot) this._walkShadow(el.shadowRoot, fn, seen);
+    });
   }
 
   _applyHides() {
-    const mapCard = this._mapEl;
-    if (!mapCard) return;
-    const cssText = this._hideCss();
+    if (!this._mapEl || !this.config) return;
+    const { hide_zoom_controls: hz, hide_orient_buttons: ho, debug } = this.config;
+    if (!hz && !ho) return;
 
-    const roots = [];
-    if (mapCard.shadowRoot) roots.push(mapCard.shadowRoot);
-    const haMap = mapCard.shadowRoot?.querySelector("ha-map");
-    if (haMap?.shadowRoot) roots.push(haMap.shadowRoot);
+    const log = [];
+    const visit = (el) => {
+      if (debug) log.push(`${el.localName} | class="${this._classText(el)}" | ${this._attrText(el)}`);
+      if (hz && this._isZoom(el)) this._hideEl(el);
+      if (ho && this._isOrient(el)) this._hideEl(el);
+    };
 
-    roots.forEach((r) => this._injectStyle(r, cssText));
+    const seen = new Set();
+    visit(this._mapEl);
+    this._walkShadow(this._mapEl.shadowRoot, visit, seen);
+
+    // Watch every shadow root we found so re-renders get re-hidden
+    seen.forEach((root) => {
+      if (this._observed.has(root)) return;
+      this._observed.add(root);
+      const obs = new MutationObserver(() => this._scheduleHideApply());
+      obs.observe(root, { childList: true, subtree: true });
+      this._observers.push(obs);
+    });
+
+    if (debug && log.length !== this._lastLogLen) {
+      this._lastLogLen = log.length;
+      console.info("[flexible-map-card] elements inside map:", log);
+    }
   }
 
   _scheduleHideApply() {
-    // The inner map renders async, so retry for a few seconds
-    clearInterval(this._hideTimer);
-    let tries = 0;
-    this._hideTimer = setInterval(() => {
-      this._applyHides();
-      if (++tries >= 25) clearInterval(this._hideTimer);
-    }, 400);
+    clearTimeout(this._hideTimer);
+    this._hideTimer = setTimeout(() => this._applyHides(), 150);
+  }
+
+  _disconnectObservers() {
+    this._observers.forEach((o) => o.disconnect());
+    this._observers = [];
+    this._observed = new WeakSet();
+    clearTimeout(this._hideTimer);
   }
 
   // ------------------------------------------------------------------------
@@ -358,7 +417,7 @@ class FlexibleMapCard extends LitElement {
     this._resizeObserver?.disconnect();
     clearTimeout(this._resizeTimer);
     clearTimeout(this._holdTimer);
-    clearInterval(this._hideTimer);
+    this._disconnectObservers();
   }
 
   static get styles() {
