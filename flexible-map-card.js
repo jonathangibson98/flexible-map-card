@@ -5,7 +5,7 @@ import {
 } from "https://unpkg.com/lit-element@2.0.1/lit-element.js?module";
 
 // ============================================================================
-// MAIN CARD COMPONENT
+// MAIN CARD COMPONENT (Vector Tile Aware)
 // ============================================================================
 class FlexibleMapCard extends LitElement {
   static get properties() {
@@ -15,12 +15,15 @@ class FlexibleMapCard extends LitElement {
     };
   }
 
-  // Define custom visual editor element for Home Assistant
+  constructor() {
+    super();
+    this._resizeObserver = null;
+  }
+
   static async getConfigElement() {
     return document.createElement("flexible-map-card-editor");
   }
 
-  // Provide default values for the visual editor
   static getStubConfig() {
     return {
       type: "custom:flexible-map-card",
@@ -45,16 +48,64 @@ class FlexibleMapCard extends LitElement {
     };
   }
 
+  // Section grid layout configuration for modern Home Assistant Dashboards
+  getGridOptions() {
+    const height = parseInt(this.config?.card_height, 10) || 250;
+    const rows = Math.max(2, Math.ceil(height / 50));
+    return {
+      rows: rows,
+      columns: 6,
+      min_rows: 2,
+      min_columns: 3,
+    };
+  }
+
+  firstUpdated() {
+    this._setupResizeObserver();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+    }
+  }
+
+  // Forces the MapLibre Vector Canvas to recalculate its viewport bounds
+  // whenever the card dimensions or slider values change
+  _setupResizeObserver() {
+    const container = this.shadowRoot.querySelector(".map-wrapper");
+    if (!container) return;
+
+    this._resizeObserver = new ResizeObserver(() => {
+      const mapElement = this.shadowRoot.querySelector("hui-map-card");
+      if (mapElement) {
+        // Trigger resize event on MapLibre inner map engine
+        const innerMap = mapElement.shadowRoot?.querySelector("ha-map");
+        if (innerMap && innerMap.map && typeof innerMap.map.resize === "function") {
+          innerMap.map.resize();
+        } else if (innerMap && typeof innerMap.resize === "function") {
+          innerMap.resize();
+        }
+        window.dispatchEvent(new Event("resize"));
+      }
+    });
+
+    this._resizeObserver.observe(container);
+  }
+
   static get styles() {
     return css`
       ha-card {
         overflow: hidden;
         display: flex;
         flex-direction: column;
+        height: 100%;
       }
       .map-wrapper {
         width: 100%;
         position: relative;
+        flex-grow: 1;
       }
       hui-map-card {
         width: 100%;
@@ -69,7 +120,7 @@ class FlexibleMapCard extends LitElement {
       return html``;
     }
 
-    // Build configuration object containing all native Home Assistant Map options
+    // Config object passed directly to Home Assistant's vector map renderer
     const mapConfig = {
       type: "map",
       title: this.config.title,
@@ -111,7 +162,7 @@ class FlexibleMapCard extends LitElement {
 }
 
 // ============================================================================
-// VISUAL EDITOR COMPONENT (GUI Picker)
+// VISUAL GUI EDITOR
 // ============================================================================
 class FlexibleMapCardEditor extends LitElement {
   static get properties() {
@@ -174,7 +225,7 @@ class FlexibleMapCardEditor extends LitElement {
 
     return html`
       <div class="card-config">
-        <!-- Title Field -->
+        <!-- Title -->
         <ha-textfield
           label="Title (Optional)"
           .value=${this._config.title || ""}
@@ -182,7 +233,7 @@ class FlexibleMapCardEditor extends LitElement {
           @input=${this._valueChanged}
         ></ha-textfield>
 
-        <!-- Custom Card Height Slider -->
+        <!-- Dynamic Card Height Slider -->
         <div class="slider-container">
           <div class="slider-header">
             <span>Card Height</span>
@@ -233,7 +284,7 @@ class FlexibleMapCardEditor extends LitElement {
           />
         </div>
 
-        <!-- Dropdowns: Theme Mode & Map Style -->
+        <!-- Theme Mode & Vector Map Styles -->
         <ha-select
           label="Theme Mode"
           .value=${this._config.theme_mode || "auto"}
@@ -246,7 +297,7 @@ class FlexibleMapCardEditor extends LitElement {
         </ha-select>
 
         <ha-select
-          label="Map Style"
+          label="Vector Map Style"
           .value=${this._config.map_style || "default"}
           .configValue=${"map_style"}
           @selected=${this._valueChanged}
@@ -259,7 +310,7 @@ class FlexibleMapCardEditor extends LitElement {
           <mwc-list-item value="toner">Toner</mwc-list-item>
         </ha-select>
 
-        <!-- Feature Toggles -->
+        <!-- Toggles -->
         <div class="toggle-grid">
           <label class="option-row">
             <span>Auto Fit</span>
@@ -355,15 +406,15 @@ class FlexibleMapCardEditor extends LitElement {
   }
 }
 
-// Register Web Components
+// Register Custom Web Components
 customElements.define("flexible-map-card", FlexibleMapCard);
 customElements.define("flexible-map-card-editor", FlexibleMapCardEditor);
 
-// Register Card in Home Assistant Card Picker UI
+// Register in Home Assistant Card Picker
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "flexible-map-card",
-  name: "Flexible Resizable Map Card",
-  description: "Map card with custom height sliders and full visual editor support.",
+  name: "Flexible Vector Map Card",
+  description: "Dynamic resizable map card built for the vector map engine.",
   preview: true,
 });
