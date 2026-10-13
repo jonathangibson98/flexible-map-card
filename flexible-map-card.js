@@ -2,22 +2,25 @@ import {
   LitElement,
   html,
   css,
-} from "https://unpkg.com/lit-element@2.0.1/lit-element.js?module";
+} from "https://unpkg.com/lit@3.2.1/index.js?module";
 
 // ============================================================================
-// MAIN CARD COMPONENT (Vector Tile Aware)
+// MAIN CARD
 // ============================================================================
 class FlexibleMapCard extends LitElement {
   static get properties() {
     return {
-      hass: {},
-      config: {},
+      hass: { attribute: false },
+      config: { attribute: false },
     };
   }
 
   constructor() {
     super();
     this._resizeObserver = null;
+    this._mapEl = null;
+    this._resizeTimer = null;
+    this._lastRatio = null;
   }
 
   static async getConfigElement() {
@@ -42,133 +45,146 @@ class FlexibleMapCard extends LitElement {
   }
 
   setConfig(config) {
-    this.config = {
-      card_height: 250,
-      ...config,
-    };
+    if (!config) throw new Error("Invalid configuration");
+    this.config = { card_height: 250, ...config };
+    // Force the inner map to rebuild with the new config
+    this._mapEl = null;
+    this._lastRatio = null;
   }
 
-  // Section grid layout configuration for modern Home Assistant Dashboards
   getGridOptions() {
     const height = parseInt(this.config?.card_height, 10) || 250;
-    const rows = Math.max(2, Math.ceil(height / 50));
     return {
-      rows: rows,
+      rows: Math.max(2, Math.ceil(height / 50)),
       columns: 6,
       min_rows: 2,
       min_columns: 3,
     };
   }
 
+  getCardSize() {
+    const height = parseInt(this.config?.card_height, 10);
+    return isNaN(height) ? 4 : Math.ceil(height / 50);
+  }
+
+  get _cardHeightPx() {
+    const h = this.config?.card_height;
+    if (typeof h === "number") return h;
+    const parsed = parseInt(h, 10);
+    return isNaN(parsed) ? 250 : parsed;
+  }
+
+  _buildMapConfig(aspectRatio) {
+    const c = this.config;
+    return {
+      type: "map",
+      title: c.title,
+      aspect_ratio: aspectRatio || c.aspect_ratio,
+      entities: c.entities || [],
+      geo_location_sources: c.geo_location_sources,
+      show_all: c.show_all,
+      auto_fit: c.auto_fit ?? false,
+      fit_zones: c.fit_zones ?? false,
+      show_zone_radius: c.show_zone_radius ?? false,
+      default_zoom: c.default_zoom ?? 14,
+      scale_ruler: c.scale_ruler ?? false,
+      theme_mode: c.theme_mode || "auto",
+      map_style: c.map_style || "default",
+      hours_to_show: c.hours_to_show ?? 0,
+      cluster: c.cluster ?? true,
+    };
+  }
+
+  async _ensureMap() {
+    const wrapper = this.shadowRoot?.querySelector(".map-wrapper");
+    if (!wrapper || !this.config) return;
+
+    const width = wrapper.clientWidth || 400;
+    const height = this._cardHeightPx;
+    const ratio = `${Math.round(width)}:${Math.round(height)}`;
+
+    // Already built and nothing changed
+    if (this._mapEl && this._lastRatio === ratio) return;
+
+    const mapConfig = this._buildMapConfig(ratio);
+
+    if (this._mapEl) {
+      // Just update config on the existing element (cheap resize path)
+      this._mapEl.setConfig(mapConfig);
+      this._lastRatio = ratio;
+      return;
+    }
+
+    // First build: use HA's helper so hui-map-card is guaranteed to be loaded
+    const helpers = await window.loadCardHelpers();
+    const el = helpers.createCardElement(mapConfig);
+    el.hass = this.hass;
+    this._mapEl = el;
+    this._lastRatio = ratio;
+
+    wrapper.innerHTML = "";
+    wrapper.appendChild(el);
+  }
+
   firstUpdated() {
-    this._setupResizeObserver();
+    const wrapper = this.shadowRoot.querySelector(".map-wrapper");
+    if (!wrapper) return;
+
+    this._resizeObserver = new ResizeObserver(() => {
+      clearTimeout(this._resizeTimer);
+      this._resizeTimer = setTimeout(() => this._ensureMap(), 150);
+    });
+    this._resizeObserver.observe(wrapper);
+
+    this._ensureMap();
+  }
+
+  updated(changed) {
+    if (changed.has("config")) {
+      this._ensureMap();
+    }
+    if (changed.has("hass") && this._mapEl) {
+      this._mapEl.hass = this.hass;
+    }
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    if (this._resizeObserver) {
-      this._resizeObserver.disconnect();
-    }
-  }
-
-  // Forces the MapLibre Vector Canvas to recalculate its viewport bounds
-  // whenever the card dimensions or slider values change
-  _setupResizeObserver() {
-    const container = this.shadowRoot.querySelector(".map-wrapper");
-    if (!container) return;
-
-    this._resizeObserver = new ResizeObserver(() => {
-      const mapElement = this.shadowRoot.querySelector("hui-map-card");
-      if (mapElement) {
-        // Trigger resize event on MapLibre inner map engine
-        const innerMap = mapElement.shadowRoot?.querySelector("ha-map");
-        if (innerMap && innerMap.map && typeof innerMap.map.resize === "function") {
-          innerMap.map.resize();
-        } else if (innerMap && typeof innerMap.resize === "function") {
-          innerMap.resize();
-        }
-        window.dispatchEvent(new Event("resize"));
-      }
-    });
-
-    this._resizeObserver.observe(container);
+    this._resizeObserver?.disconnect();
+    clearTimeout(this._resizeTimer);
   }
 
   static get styles() {
     return css`
       ha-card {
         overflow: hidden;
-        display: flex;
-        flex-direction: column;
         height: 100%;
       }
       .map-wrapper {
         width: 100%;
         position: relative;
-        flex-grow: 1;
-      }
-      hui-map-card {
-        width: 100%;
-        height: 100%;
-        display: block;
       }
     `;
   }
 
   render() {
-    if (!this.hass || !this.config) {
-      return html``;
-    }
-
-    // Config object passed directly to Home Assistant's vector map renderer
-    const mapConfig = {
-      type: "map",
-      title: this.config.title,
-      aspect_ratio: this.config.aspect_ratio,
-      entities: this.config.entities || [],
-      geo_location_sources: this.config.geo_location_sources,
-      show_all: this.config.show_all,
-      auto_fit: this.config.auto_fit ?? false,
-      fit_zones: this.config.fit_zones ?? false,
-      show_zone_radius: this.config.show_zone_radius ?? false,
-      default_zoom: this.config.default_zoom ?? 14,
-      scale_ruler: this.config.scale_ruler ?? false,
-      theme_mode: this.config.theme_mode || "auto",
-      map_style: this.config.map_style || "default",
-      hours_to_show: this.config.hours_to_show ?? 0,
-      cluster: this.config.cluster ?? true,
-    };
-
-    const cardHeight = typeof this.config.card_height === "number" 
-      ? `${this.config.card_height}px` 
-      : (this.config.card_height || "250px");
-
+    if (!this.hass || !this.config) return html``;
     return html`
-      <ha-card .header=${this.config.title ? undefined : null}>
-        <div class="map-wrapper" style="height: ${cardHeight};">
-          <hui-map-card
-            .hass=${this.hass}
-            .config=${mapConfig}
-          ></hui-map-card>
-        </div>
+      <ha-card>
+        <div class="map-wrapper" style="height: ${this._cardHeightPx}px;"></div>
       </ha-card>
     `;
-  }
-
-  getCardSize() {
-    const height = parseInt(this.config.card_height, 10);
-    return isNaN(height) ? 4 : Math.ceil(height / 50);
   }
 }
 
 // ============================================================================
-// VISUAL GUI EDITOR
+// EDITOR (uses ha-form so it survives HA frontend changes)
 // ============================================================================
 class FlexibleMapCardEditor extends LitElement {
   static get properties() {
     return {
-      hass: {},
-      _config: {},
+      hass: { attribute: false },
+      _config: { attribute: false },
     };
   }
 
@@ -176,241 +192,115 @@ class FlexibleMapCardEditor extends LitElement {
     this._config = config;
   }
 
-  static get styles() {
-    return css`
-      .card-config {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        padding: 8px 0;
-      }
-      .option-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-      }
-      .slider-container {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      .slider-header {
-        display: flex;
-        justify-content: space-between;
-        font-size: 14px;
-      }
-      input[type="range"] {
-        width: 100%;
-        cursor: pointer;
-      }
-      ha-textfield, ha-select {
-        width: 100%;
-      }
-      .toggle-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }
-    `;
+  get _schema() {
+    const opts = (arr) =>
+      arr.map((v) => ({ value: v, label: v[0].toUpperCase() + v.slice(1) }));
+    return [
+      { name: "title", selector: { text: {} } },
+      { name: "entities", selector: { entity: { multiple: true } } },
+      {
+        name: "card_height",
+        selector: {
+          number: { min: 100, max: 1000, step: 10, mode: "slider", unit_of_measurement: "px" },
+        },
+      },
+      {
+        name: "default_zoom",
+        selector: { number: { min: 1, max: 20, step: 1, mode: "slider" } },
+      },
+      {
+        name: "hours_to_show",
+        selector: {
+          number: { min: 0, max: 168, step: 1, mode: "slider", unit_of_measurement: "h" },
+        },
+      },
+      {
+        name: "theme_mode",
+        selector: { select: { mode: "dropdown", options: opts(["auto", "light", "dark"]) } },
+      },
+      {
+        name: "map_style",
+        selector: {
+          select: {
+            mode: "dropdown",
+            options: opts(["default", "colorful", "natural", "muted", "gray", "toner"]),
+          },
+        },
+      },
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "auto_fit", selector: { boolean: {} } },
+          { name: "fit_zones", selector: { boolean: {} } },
+          { name: "show_zone_radius", selector: { boolean: {} } },
+          { name: "scale_ruler", selector: { boolean: {} } },
+          { name: "cluster", selector: { boolean: {} } },
+        ],
+      },
+    ];
+  }
+
+  _label = (schema) => {
+    const labels = {
+      title: "Title (optional)",
+      entities: "Entities",
+      card_height: "Card height",
+      default_zoom: "Default zoom",
+      hours_to_show: "History path (hours)",
+      theme_mode: "Theme mode",
+      map_style: "Map style",
+      auto_fit: "Auto fit",
+      fit_zones: "Fit zones",
+      show_zone_radius: "Show zone radius",
+      scale_ruler: "Scale ruler",
+      cluster: "Cluster markers",
+    };
+    return labels[schema.name] || schema.name;
+  };
+
+  _valueChanged(ev) {
+    ev.stopPropagation();
+    this._config = ev.detail.value;
+    this.dispatchEvent(
+      new CustomEvent("config-changed", {
+        detail: { config: this._config },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   render() {
-    if (!this.hass || !this._config) {
-      return html``;
-    }
-
-    const currentHeight = this._config.card_height ?? 250;
-    const currentZoom = this._config.default_zoom ?? 14;
-    const currentHours = this._config.hours_to_show ?? 0;
-
+    if (!this.hass || !this._config) return html``;
+    const data = {
+      card_height: 250,
+      default_zoom: 14,
+      hours_to_show: 0,
+      theme_mode: "auto",
+      map_style: "default",
+      cluster: true,
+      ...this._config,
+      // ha-form's entity picker wants plain strings
+      entities: (this._config.entities || []).map((e) =>
+        typeof e === "string" ? e : e.entity
+      ),
+    };
     return html`
-      <div class="card-config">
-        <!-- Title -->
-        <ha-textfield
-          label="Title (Optional)"
-          .value=${this._config.title || ""}
-          .configValue=${"title"}
-          @input=${this._valueChanged}
-        ></ha-textfield>
-
-        <!-- Dynamic Card Height Slider -->
-        <div class="slider-container">
-          <div class="slider-header">
-            <span>Card Height</span>
-            <span><strong>${currentHeight}px</strong></span>
-          </div>
-          <input
-            type="range"
-            min="100"
-            max="1000"
-            step="10"
-            .value=${currentHeight}
-            .configValue=${"card_height"}
-            @input=${this._numberValueChanged}
-          />
-        </div>
-
-        <!-- Zoom Level Slider -->
-        <div class="slider-container">
-          <div class="slider-header">
-            <span>Default Zoom Level</span>
-            <span><strong>${currentZoom}</strong></span>
-          </div>
-          <input
-            type="range"
-            min="1"
-            max="20"
-            step="1"
-            .value=${currentZoom}
-            .configValue=${"default_zoom"}
-            @input=${this._numberValueChanged}
-          />
-        </div>
-
-        <!-- Hours to Show Slider -->
-        <div class="slider-container">
-          <div class="slider-header">
-            <span>History Path (Hours to Show)</span>
-            <span><strong>${currentHours} hrs</strong></span>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="168"
-            step="1"
-            .value=${currentHours}
-            .configValue=${"hours_to_show"}
-            @input=${this._numberValueChanged}
-          />
-        </div>
-
-        <!-- Theme Mode & Vector Map Styles -->
-        <ha-select
-          label="Theme Mode"
-          .value=${this._config.theme_mode || "auto"}
-          .configValue=${"theme_mode"}
-          @selected=${this._valueChanged}
-        >
-          <mwc-list-item value="auto">Auto</mwc-list-item>
-          <mwc-list-item value="light">Light</mwc-list-item>
-          <mwc-list-item value="dark">Dark</mwc-list-item>
-        </ha-select>
-
-        <ha-select
-          label="Vector Map Style"
-          .value=${this._config.map_style || "default"}
-          .configValue=${"map_style"}
-          @selected=${this._valueChanged}
-        >
-          <mwc-list-item value="default">Default</mwc-list-item>
-          <mwc-list-item value="colorful">Colorful</mwc-list-item>
-          <mwc-list-item value="natural">Natural</mwc-list-item>
-          <mwc-list-item value="muted">Muted</mwc-list-item>
-          <mwc-list-item value="gray">Gray</mwc-list-item>
-          <mwc-list-item value="toner">Toner</mwc-list-item>
-        </ha-select>
-
-        <!-- Toggles -->
-        <div class="toggle-grid">
-          <label class="option-row">
-            <span>Auto Fit</span>
-            <ha-switch
-              .checked=${this._config.auto_fit ?? false}
-              .configValue=${"auto_fit"}
-              @change=${this._toggleChanged}
-            ></ha-switch>
-          </label>
-
-          <label class="option-row">
-            <span>Fit Zones</span>
-            <ha-switch
-              .checked=${this._config.fit_zones ?? false}
-              .configValue=${"fit_zones"}
-              @change=${this._toggleChanged}
-            ></ha-switch>
-          </label>
-
-          <label class="option-row">
-            <span>Show Zone Radius</span>
-            <ha-switch
-              .checked=${this._config.show_zone_radius ?? false}
-              .configValue=${"show_zone_radius"}
-              @change=${this._toggleChanged}
-            ></ha-switch>
-          </label>
-
-          <label class="option-row">
-            <span>Scale Ruler</span>
-            <ha-switch
-              .checked=${this._config.scale_ruler ?? false}
-              .configValue=${"scale_ruler"}
-              @change=${this._toggleChanged}
-            ></ha-switch>
-          </label>
-
-          <label class="option-row">
-            <span>Cluster Markers</span>
-            <ha-switch
-              .checked=${this._config.cluster ?? true}
-              .configValue=${"cluster"}
-              @change=${this._toggleChanged}
-            ></ha-switch>
-          </label>
-        </div>
-      </div>
+      <ha-form
+        .hass=${this.hass}
+        .data=${data}
+        .schema=${this._schema}
+        .computeLabel=${this._label}
+        @value-changed=${this._valueChanged}
+      ></ha-form>
     `;
-  }
-
-  _valueChanged(ev) {
-    if (!this._config || !this.hass) return;
-    const target = ev.target;
-    if (this._config[target.configValue] === target.value) return;
-
-    this._config = {
-      ...this._config,
-      [target.configValue]: target.value,
-    };
-    this._fireConfigChanged();
-  }
-
-  _numberValueChanged(ev) {
-    if (!this._config || !this.hass) return;
-    const target = ev.target;
-    const value = parseFloat(target.value);
-
-    this._config = {
-      ...this._config,
-      [target.configValue]: value,
-    };
-    this._fireConfigChanged();
-  }
-
-  _toggleChanged(ev) {
-    if (!this._config || !this.hass) return;
-    const target = ev.target;
-
-    this._config = {
-      ...this._config,
-      [target.configValue]: target.checked,
-    };
-    this._fireConfigChanged();
-  }
-
-  _fireConfigChanged() {
-    const event = new CustomEvent("config-changed", {
-      detail: { config: this._config },
-      bubbles: true,
-      composed: true,
-    });
-    this.dispatchEvent(event);
   }
 }
 
-// Register Custom Web Components
 customElements.define("flexible-map-card", FlexibleMapCard);
 customElements.define("flexible-map-card-editor", FlexibleMapCardEditor);
 
-// Register in Home Assistant Card Picker
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "flexible-map-card",
