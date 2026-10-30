@@ -190,10 +190,47 @@ class FlexibleMapCard extends LitElement {
   }
 
   // ------------------------------------------------------------------------
+  // Click-to-Zoom Handler
+  // ------------------------------------------------------------------------
+  _handleMoreInfo(ev) {
+    const entityId = ev.detail?.entityId;
+    if (!entityId || !this.hass) return;
+
+    const stateObj = this.hass.states[entityId];
+    const lat = stateObj?.attributes?.latitude;
+    const lon = stateObj?.attributes?.longitude;
+
+    if (lat !== undefined && lon !== undefined) {
+      // Prevent more-info dialog from opening
+      ev.stopPropagation();
+      ev.preventDefault();
+
+      // Find the Leaflet map instance inside the inner ha-map shadow DOM
+      try {
+        const haMap = this._mapEl?.shadowRoot?.querySelector("ha-map");
+        const leafletMap = haMap?._map || haMap?.map;
+        if (leafletMap && typeof leafletMap.setView === "function") {
+          const currentZoom = leafletMap.getZoom ? leafletMap.getZoom() : (this.config.default_zoom || 16);
+          leafletMap.setView([lat, lon], Math.max(currentZoom, 16));
+          return;
+        }
+      } catch (err) {
+        console.warn("[flexible-map-card] Could not access leaflet map directly, fallback configuration update.", err);
+      }
+
+      // Fallback: update map configuration to focus/zoom if direct reference isn't found
+      if (this._mapEl) {
+        const updatedConfig = {
+          ...this._mapEl.config,
+          default_zoom: Math.max(this.config.default_zoom || 14, 16),
+        };
+        this._mapEl.setConfig(updatedConfig);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------
   // Hiding the zoom / orient buttons
-  // The buttons live inside nested shadow roots, so we walk every shadow root
-  // under the map, hide anything that looks like a zoom or orient control,
-  // and keep watching in case the map re-renders.
   // ------------------------------------------------------------------------
   _attrText(el) {
     return [
@@ -212,7 +249,6 @@ class FlexibleMapCard extends LitElement {
   }
 
   _hideEl(el) {
-    // If the match lives inside an <ha-icon-button>, hide the whole button
     const host = el.getRootNode?.()?.host;
     const target = host && host.localName === "ha-icon-button" ? host : el;
     target.style.setProperty("display", "none", "important");
@@ -230,7 +266,6 @@ class FlexibleMapCard extends LitElement {
 
   _isOrient(el) {
     if (/compass|geolocate|reset|recenter/.test(this._classText(el))) return true;
-    // The recenter button the native hui-map-card floats over the map
     const host = el.getRootNode?.()?.host;
     if (el.localName === "ha-icon-button" && host?.localName === "hui-map-card") {
       return true;
@@ -269,7 +304,6 @@ class FlexibleMapCard extends LitElement {
     visit(this._mapEl);
     this._walkShadow(this._mapEl.shadowRoot, visit, seen);
 
-    // Watch every shadow root we found so re-renders get re-hidden
     seen.forEach((root) => {
       if (this._observed.has(root)) return;
       this._observed.add(root);
@@ -328,7 +362,6 @@ class FlexibleMapCard extends LitElement {
   }
 
   _onContextMenu(ev) {
-    // Stops the phone's long-press menu from fighting the hold action
     if (this._hasHold()) ev.preventDefault();
   }
 
@@ -397,7 +430,10 @@ class FlexibleMapCard extends LitElement {
     });
     this._resizeObserver.observe(wrapper);
 
-    // Capture phase so the map's own drag handling can't swallow these
+    // Intercept more-info events to handle click-to-zoom instead of opening dialog
+    wrapper.addEventListener("hass-more-info", (e) => this._handleMoreInfo(e), true);
+
+    // Capture phase so the map's own drag handling can't swallow these pointers
     wrapper.addEventListener("pointerdown", (e) => this._onPointerDown(e), true);
     wrapper.addEventListener("pointermove", (e) => this._onPointerMove(e), true);
     wrapper.addEventListener("pointerup", () => this._cancelHold(), true);
@@ -416,7 +452,6 @@ class FlexibleMapCard extends LitElement {
       if (this._mapEl) this._mapEl.hass = this.hass;
       if (!this._mapEl && this.hass) this._ensureMap();
 
-      // "Add all entities": rebuild only if the set of located entities changed
       if (this._mapEl && this.config?.add_all_entities) {
         const key = this._entitiesKeyOf(this._collectEntities());
         if (key !== this._entitiesKey) {
