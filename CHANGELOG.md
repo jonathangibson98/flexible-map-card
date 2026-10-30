@@ -2,7 +2,7 @@
 
 All notable changes to the **Flexible Vector Map Card** will be documented in this file.
 
-## [1.1.0] - 2026-10-29
+## [1.9.0] - 2026-10-29
 
 ### Added
 * **Click-to-Zoom Behavior:** Clicking an entity marker on the map now intercepts the default `more-info` action, preventing the modal dialog from opening and smoothly centering and zooming the map directly onto that entity's coordinates.
