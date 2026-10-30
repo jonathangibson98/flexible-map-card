@@ -106,11 +106,26 @@ class FlexibleMapCard extends LitElement {
       configured.map((e) => (typeof e === "string" ? e : e.entity))
     );
     const registry = this.hass.entities || {};
+
+    // Gather all device trackers that are assigned to a person entity
+    const personTrackers = new Set();
+    for (const [id, st] of Object.entries(this.hass.states)) {
+      if (id.startsWith("person.")) {
+        const trackers = st.attributes?.device_trackers;
+        if (Array.isArray(trackers)) {
+          trackers.forEach((t) => personTrackers.add(t));
+        }
+      }
+    }
+
     const extra = [];
     for (const [id, st] of Object.entries(this.hass.states)) {
       if (have.has(id)) continue;
       // Skip anything you've hidden in the entity registry (like the native card)
       if (registry[id]?.hidden) continue;
+      // Skip device trackers that are used by a person entity
+      if (personTrackers.has(id)) continue;
+
       const a = st.attributes || {};
       if (a.latitude !== undefined && a.longitude !== undefined) extra.push(id);
     }
