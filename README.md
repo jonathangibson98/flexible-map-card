@@ -6,7 +6,7 @@ One repository, one install. It gives Home Assistant:
 * **A "Flexible Map" dashboard in the sidebar** with its own logo: pick people, pick a day (or any dates), see the trail, a timeline of where they were (Home, Work, on the move) and distance in miles. Tabs for Places, Import and Settings.
 * **The Flexible Map card** for any normal dashboard (`custom:flexible-map-card`). It reads the same history file, with 1h / 6h / 24h / 3d / 7d buttons, a distance legend, click-to-zoom, dark map after sunset, and everything the old card did.
 * **Places** are normal Home Assistant zones, so they show on every map and work in automations.
-* **Import**: JSON files (a list of points, Google `Records.json`, GeoJSON, OwnTracks) for a device of your choice, plus a one-click copy of Home Assistant's existing history.
+* **Import**: JSON files (Google Timeline `Timeline.json` from your phone, Google `Records.json`, a list of points, GeoJSON, OwnTracks) for a device of your choice, plus a one-click copy of Home Assistant's existing history.
 
 ## Install (HACS)
 
@@ -37,6 +37,7 @@ dark_at_night: true
 | :--- | :--- | :--- |
 | `entities` | `[]` | People / devices to show. Use `{entity: person.jon, color: "#ff6b6b"}` to pick a trail color. |
 | `add_all_entities` | `false` | Show everything that has a location. |
+| `show_zones` | `false` | Draw zone icons (Home, Work, ...) even when `entities` lists only people. |
 | `hours_to_show` | `24` | History trail length (0 = off). |
 | `history_source` | `auto` | `auto` = history file first, Home Assistant's recorder for anything missing. `integration` or `ha` to force one. |
 | `show_history_controls` | `true` | Off / 1h / 6h / 24h / 3d / 7d buttons on the map. |
