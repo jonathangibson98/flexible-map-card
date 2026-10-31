@@ -1,0 +1,29 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Flexible Map",
+        "description": "Keeps a location history file and adds a Flexible Map dashboard to your sidebar. Nothing to fill in, just press Submit."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Flexible Map is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Flexible Map settings",
+        "description": "Leave the tracked list empty to record every person.",
+        "data": {
+          "tracked_entities": "People / devices to record",
+          "units": "Distance units",
+          "min_distance_m": "Only save a point after moving at least (m)",
+          "min_seconds": "Only save a point at least this far apart in time (s)",
+          "max_accuracy_m": "Ignore points less accurate than (m, 0 = off)",
+          "retention_days": "Delete history older than (days, 0 = keep forever)"
+        }
+      }
+    }
+  }
+}
