@@ -49,7 +49,15 @@ A dynamic, resizable custom map card for Home Assistant built for modern dashboa
 | `full_width` | boolean | `true` | Whether the card stretches to fill the container width. |
 | `card_width` | integer | `400` | Fixed width in pixels (only applies when `full_width` is disabled). |
 | `default_zoom` | integer | `14` | Initial map zoom level (1–20). |
-| `hours_to_show` | integer | `0` | Number of hours of historical tracking paths to display. |
+| `hours_to_show` | integer | `24` | Hours of history trail to draw (`0` = off). Can be changed live with the on-map buttons. |
+| `show_history_controls` | boolean | `true` | Show the Off / 1h / 6h / 24h / 3d / 7d buttons. |
+| `history_ranges` | list | `[1, 6, 24, 72, 168]` | Hours for the on-map buttons (YAML only). |
+| `show_distance` | boolean | `true` | Show distance travelled per entity for the selected range. |
+| `units` | string | `mi` | `mi` or `km` for the distance legend. |
+| `min_move_m` | integer | `20` | Ignore points closer than this many meters (GPS jitter). |
+| `max_accuracy_m` | integer | `0` | Drop points whose `gps_accuracy` is worse than this (0 = off). |
+| `history_refresh_seconds` | integer | `60` | How often trails refresh. |
+| `dark_at_night` | boolean | `false` | Force the dark map while `sun.sun` is below the horizon. |
 | `theme_mode` | string | `auto` | Color theme mode: `auto`, `light`, or `dark`. |
 | `map_style` | string | `default` | Map style: `default`, `colorful`, `natural`, `muted`, `gray`, or `toner`. |
 | `auto_fit` | boolean | `false` | Automatically center and zoom the map to fit all visible markers. |

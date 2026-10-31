@@ -6,6 +6,9 @@ import {
 
 const HOLD_MS = 600;
 const MOVE_TOLERANCE_PX = 10;
+const DEFAULT_RANGES = [1, 6, 24, 72, 168];
+const FALLBACK_COLORS = ["#ff6b6b", "#4dabf7", "#51cf66", "#fcc419", "#cc5de8", "#ff922b", "#22b8cf", "#f06595"];
+const METERS_PER_MILE = 1609.344;
 
 // ============================================================================
 // MAIN CARD
@@ -31,6 +34,13 @@ class FlexibleMapCard extends LitElement {
     this._observers = [];
     this._observed = new WeakSet();
     this._lastLogLen = 0;
+    // history / trails
+    this._activeHours = 0;
+    this._trails = [];
+    this._histToken = 0;
+    this._histTimer = null;
+    this._applyRetry = null;
+    this._lastThemeMode = null;
   }
 
   static async getConfigElement() {
@@ -48,7 +58,13 @@ class FlexibleMapCard extends LitElement {
       default_zoom: 14,
       theme_mode: "auto",
       map_style: "default",
-      hours_to_show: 0,
+      hours_to_show: 24,
+      show_history_controls: true,
+      show_distance: true,
+      units: "mi",
+      dark_at_night: false,
+      min_move_m: 20,
+      history_refresh_seconds: 60,
       auto_fit: false,
       fit_zones: false,
       show_zone_radius: false,
@@ -62,11 +78,20 @@ class FlexibleMapCard extends LitElement {
 
   setConfig(config) {
     if (!config) throw new Error("Invalid configuration");
-    this.config = { card_height: 250, full_width: true, card_width: 400, ...config };
+    this.config = {
+      card_height: 250,
+      full_width: true,
+      card_width: 400,
+      hours_to_show: 24,
+      ...config,
+    };
+    this._activeHours = Number(this.config.hours_to_show) || 0;
+    this._trails = [];
     this._mapEl = null;
     this._lastRatio = null;
     this._entitiesKey = "";
     this._disconnectObservers();
+    this._restartHistoryTimer();
   }
 
   getGridOptions() {
@@ -136,8 +161,18 @@ class FlexibleMapCard extends LitElement {
     return list.map((e) => (typeof e === "string" ? e : e.entity)).join(",");
   }
 
+  _themeMode() {
+    const base = this.config?.theme_mode || "auto";
+    if (this.config?.dark_at_night && base === "auto") {
+      const sun = this.hass?.states?.["sun.sun"]?.state;
+      if (sun === "below_horizon") return "dark";
+    }
+    return base;
+  }
+
   _buildMapConfig(aspectRatio) {
     const c = this.config;
+    this._lastThemeMode = this._themeMode();
     const entities = this._collectEntities();
     this._entitiesKey = this._entitiesKeyOf(entities);
     return {
@@ -151,9 +186,11 @@ class FlexibleMapCard extends LitElement {
       show_zone_radius: c.show_zone_radius ?? false,
       default_zoom: c.default_zoom ?? 14,
       scale_ruler: c.scale_ruler ?? false,
-      theme_mode: c.theme_mode || "auto",
+      theme_mode: this._themeMode(),
       map_style: c.map_style || "default",
-      hours_to_show: c.hours_to_show ?? 0,
+      // History is drawn by this card itself (see _fetchHistory), so the
+      // built-in trail is switched off to avoid double-drawing.
+      hours_to_show: 0,
       cluster: c.cluster ?? true,
     };
   }
@@ -187,6 +224,7 @@ class FlexibleMapCard extends LitElement {
     wrapper.appendChild(el);
     this._scheduleHideApply();
     [400, 1200, 3000].forEach((ms) => setTimeout(() => this._applyHides(), ms));
+    this._fetchHistory();
   }
 
   // ------------------------------------------------------------------------
@@ -205,17 +243,17 @@ class FlexibleMapCard extends LitElement {
       ev.stopPropagation();
       ev.preventDefault();
 
-      // Find the Leaflet map instance inside the inner ha-map shadow DOM
+      // HA's map now runs on MapLibre; ha-map exposes setView()/getView()
       try {
-        const haMap = this._mapEl?.shadowRoot?.querySelector("ha-map");
-        const leafletMap = haMap?._map || haMap?.map;
-        if (leafletMap && typeof leafletMap.setView === "function") {
-          const currentZoom = leafletMap.getZoom ? leafletMap.getZoom() : (this.config.default_zoom || 16);
-          leafletMap.setView([lat, lon], Math.max(currentZoom, 16));
+        const haMap = this._haMap();
+        if (haMap && typeof haMap.setView === "function") {
+          const cur = haMap.getView?.();
+          const curZoom = typeof cur?.zoom === "number" ? cur.zoom : 0;
+          haMap.setView([lat, lon], Math.max(curZoom, 16));
           return;
         }
       } catch (err) {
-        console.warn("[flexible-map-card] Could not access leaflet map directly, fallback configuration update.", err);
+        console.warn("[flexible-map-card] setView failed, using fallback.", err);
       }
 
       // Fallback: update map configuration to focus/zoom if direct reference isn't found
@@ -227,6 +265,207 @@ class FlexibleMapCard extends LitElement {
         this._mapEl.setConfig(updatedConfig);
       }
     }
+  }
+
+  // ------------------------------------------------------------------------
+  // History trails (drawn by this card, independent of the built-in trail)
+  // ------------------------------------------------------------------------
+  _haMap() {
+    return this._mapEl?.shadowRoot?.querySelector("ha-map") || null;
+  }
+
+  _trailEntityIds() {
+    const ids = [];
+    for (const e of this._collectEntities()) {
+      const id = typeof e === "string" ? e : e?.entity;
+      if (id && !id.startsWith("zone.")) ids.push(id);
+    }
+    return [...new Set(ids)];
+  }
+
+  _colorFor(id, idx) {
+    const cfg = (this.config.entities || []).find(
+      (e) => typeof e !== "string" && e?.entity === id
+    );
+    if (cfg?.color) return cfg.color;
+    const marker = this._haMap()?.entities?.find?.((e) => e.entity_id === id);
+    return marker?.color || FALLBACK_COLORS[idx % FALLBACK_COLORS.length];
+  }
+
+  _distM(a, b) {
+    const rad = Math.PI / 180;
+    const dLat = (b[0] - a[0]) * rad;
+    const dLon = (b[1] - a[1]) * rad;
+    const h =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLon / 2) ** 2;
+    return 2 * 6371000 * Math.asin(Math.sqrt(h));
+  }
+
+  _restartHistoryTimer() {
+    clearInterval(this._histTimer);
+    this._histTimer = null;
+    if (!this.isConnected || !this.config) return;
+    const secs = Math.max(15, Number(this.config.history_refresh_seconds) || 60);
+    this._histTimer = setInterval(() => this._fetchHistory(), secs * 1000);
+  }
+
+  async _fetchHistory() {
+    const hours = Number(this._activeHours) || 0;
+    const token = ++this._histToken;
+    if (!this.hass || !this.config) return;
+
+    const ids = hours ? this._trailEntityIds() : [];
+    if (!hours || !ids.length) {
+      this._trails = [];
+      this._applyPaths();
+      this.requestUpdate();
+      return;
+    }
+
+    const end = new Date();
+    const start = new Date(end.getTime() - hours * 3600 * 1000);
+    let res;
+    try {
+      res = await this.hass.callWS({
+        type: "history/history_during_period",
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        entity_ids: ids,
+        include_start_time_state: true,
+        significant_changes_only: false,
+        minimal_response: false,
+        no_attributes: false,
+      });
+    } catch (err) {
+      console.warn("[flexible-map-card] history request failed", err);
+      return;
+    }
+    if (token !== this._histToken) return; // a newer request superseded this one
+
+    const minMove = Math.max(0, Number(this.config.min_move_m ?? 20));
+    const maxAcc = Number(this.config.max_accuracy_m) || 0;
+    const toDate = (v) => (typeof v === "number" ? new Date(v * 1000) : new Date(v));
+    const trails = [];
+
+    ids.forEach((id, idx) => {
+      const rows = Array.isArray(res?.[id]) ? res[id] : [];
+      const points = [];
+      let distM = 0;
+
+      const add = (lat, lon, ts, force) => {
+        if (typeof lat !== "number" || typeof lon !== "number") return;
+        const last = points[points.length - 1];
+        if (last) {
+          const d = this._distM(last.point, [lat, lon]);
+          if (d < minMove && !force) return;
+          if (d === 0) return;
+          distM += d;
+        }
+        points.push({ point: [lat, lon], timestamp: ts });
+      };
+
+      for (const row of rows) {
+        const a = row.a ?? row.attributes ?? {};
+        if (maxAcc && typeof a.gps_accuracy === "number" && a.gps_accuracy > maxAcc) continue;
+        add(a.latitude, a.longitude, toDate(row.lu ?? row.last_updated ?? row.lc), false);
+      }
+
+      // Make sure the trail reaches the marker's current position
+      const cur = this.hass.states[id]?.attributes;
+      if (cur) add(cur.latitude, cur.longitude, new Date(), true);
+
+      const stateObj = this.hass.states[id];
+      trails.push({
+        id,
+        name: stateObj?.attributes?.friendly_name || id,
+        color: this._colorFor(id, idx),
+        points,
+        distM,
+      });
+    });
+
+    this._trails = trails;
+    this._applyPaths();
+    this.requestUpdate();
+  }
+
+  _applyPaths(attempt = 0) {
+    clearTimeout(this._applyRetry);
+    const haMap = this._haMap();
+    if (!haMap) {
+      // inner map isn't rendered yet; try again shortly
+      if (attempt < 12) {
+        this._applyRetry = setTimeout(() => this._applyPaths(attempt + 1), 500);
+      }
+      return;
+    }
+    const hours = Number(this._activeHours) || 0;
+    const paths = hours
+      ? this._trails
+          .filter((t) => t.points.length >= 2)
+          .map((t) => ({
+            points: t.points,
+            name: t.name,
+            color: t.color,
+            // gradual opacity divides by (points - 2), so it needs 3+ points
+            gradualOpacity: t.points.length > 2 ? 0.8 : undefined,
+            fullDatetime: hours > 144,
+          }))
+      : [];
+    haMap.paths = paths.length ? paths : undefined;
+  }
+
+  _setRange(hours) {
+    this._activeHours = hours;
+    this._fetchHistory();
+    this.requestUpdate();
+  }
+
+  _rangeLabel(h) {
+    if (!h) return "Off";
+    if (h < 24 || h % 24) return `${h}h`;
+    return `${h / 24}d`;
+  }
+
+  _fmtDist(m) {
+    const km = this.config?.units === "km";
+    const v = km ? m / 1000 : m / METERS_PER_MILE;
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${km ? "km" : "mi"}`;
+  }
+
+  _renderControls() {
+    const c = this.config;
+    const active = Number(this._activeHours) || 0;
+    const ranges = Array.isArray(c.history_ranges) && c.history_ranges.length
+      ? c.history_ranges
+      : DEFAULT_RANGES;
+    const chips =
+      c.show_history_controls === false
+        ? html``
+        : html`<div class="chips">
+            ${[0, ...ranges].map(
+              (h) => html`<button
+                class=${h === active ? "chip on" : "chip"}
+                @click=${() => this._setRange(h)}
+              >${this._rangeLabel(h)}</button>`
+            )}
+          </div>`;
+
+    const shown = this._trails.filter((t) => t.points.length >= 2);
+    const legend =
+      c.show_distance === false || !active || !shown.length
+        ? html``
+        : html`<div class="legend">
+            ${shown.map(
+              (t) => html`<div class="row">
+                <span class="dot" style="background:${t.color}"></span>
+                <span class="nm">${t.name}</span>
+                <span class="mi">${this._fmtDist(t.distM)}</span>
+              </div>`
+            )}
+          </div>`;
+    return html`${chips}${legend}`;
   }
 
   // ------------------------------------------------------------------------
@@ -444,6 +683,12 @@ class FlexibleMapCard extends LitElement {
     this._ensureMap();
   }
 
+  connectedCallback() {
+    super.connectedCallback();
+    this._restartHistoryTimer();
+    if (this._mapEl) this._fetchHistory();
+  }
+
   updated(changed) {
     if (changed.has("config")) {
       this._ensureMap();
@@ -452,11 +697,21 @@ class FlexibleMapCard extends LitElement {
       if (this._mapEl) this._mapEl.hass = this.hass;
       if (!this._mapEl && this.hass) this._ensureMap();
 
-      if (this._mapEl && this.config?.add_all_entities) {
-        const key = this._entitiesKeyOf(this._collectEntities());
-        if (key !== this._entitiesKey) {
+      if (this._mapEl) {
+        let rebuild = this._themeMode() !== this._lastThemeMode;
+        let refetch = false;
+        if (this.config?.add_all_entities) {
+          const key = this._entitiesKeyOf(this._collectEntities());
+          if (key !== this._entitiesKey) {
+            rebuild = true;
+            refetch = true;
+          }
+        }
+        if (rebuild) {
           this._mapEl.setConfig(this._buildMapConfig(this._lastRatio));
           this._scheduleHideApply();
+          this._applyPaths(); // re-assert trails after the inner map reconfigures
+          if (refetch) this._fetchHistory();
         }
       }
     }
@@ -467,6 +722,9 @@ class FlexibleMapCard extends LitElement {
     this._resizeObserver?.disconnect();
     clearTimeout(this._resizeTimer);
     clearTimeout(this._holdTimer);
+    clearTimeout(this._applyRetry);
+    clearInterval(this._histTimer);
+    this._histTimer = null;
     this._disconnectObservers();
   }
 
@@ -479,13 +737,85 @@ class FlexibleMapCard extends LitElement {
         box-shadow: none;
         border: none;
       }
-      .map-wrapper {
+      .shell {
         position: relative;
         margin: 0 auto;
         max-width: 100%;
+      }
+      .map-wrapper {
+        position: relative;
+        width: 100%;
+        height: 100%;
         touch-action: pan-x pan-y;
         -webkit-touch-callout: none;
         user-select: none;
+      }
+      .chips {
+        position: absolute;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 4px;
+        padding: 3px;
+        border-radius: 16px;
+        background: var(--card-background-color, #fff);
+        opacity: 0.92;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        z-index: 5;
+      }
+      .chip {
+        border: none;
+        background: transparent;
+        color: var(--primary-text-color, #222);
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        padding: 6px 9px;
+        border-radius: 13px;
+        cursor: pointer;
+      }
+      .chip.on {
+        background: var(--primary-color, #03a9f4);
+        color: var(--text-primary-color, #fff);
+      }
+      .legend {
+        position: absolute;
+        left: 8px;
+        bottom: 24px;
+        max-width: 60%;
+        max-height: 40%;
+        overflow: auto;
+        padding: 6px 8px;
+        border-radius: 8px;
+        background: var(--card-background-color, #fff);
+        color: var(--primary-text-color, #222);
+        opacity: 0.92;
+        font-size: 12px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        z-index: 5;
+      }
+      .legend .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 1px 0;
+      }
+      .legend .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .legend .nm {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .legend .mi {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.8;
       }
     `;
   }
@@ -495,9 +825,12 @@ class FlexibleMapCard extends LitElement {
     return html`
       <ha-card>
         <div
-          class="map-wrapper"
+          class="shell"
           style="height: ${this._cardHeightPx}px; width: ${this._wrapperWidthCss};"
-        ></div>
+        >
+          <div class="map-wrapper"></div>
+          ${this._renderControls()}
+        </div>
       </ha-card>
     `;
   }
@@ -545,8 +878,19 @@ class FlexibleMapCardEditor extends LitElement {
       {
         name: "hours_to_show",
         selector: {
-          number: { min: 0, max: 168, step: 1, mode: "slider", unit_of_measurement: "h" },
+          number: { min: 0, max: 240, step: 1, mode: "slider", unit_of_measurement: "h" },
         },
+      },
+      {
+        name: "units",
+        selector: { select: { mode: "dropdown", options: [
+          { value: "mi", label: "Miles" },
+          { value: "km", label: "Kilometers" },
+        ] } },
+      },
+      {
+        name: "min_move_m",
+        selector: { number: { min: 0, max: 200, step: 5, mode: "slider", unit_of_measurement: "m" } },
       },
       {
         name: "theme_mode",
@@ -565,6 +909,9 @@ class FlexibleMapCardEditor extends LitElement {
         type: "grid",
         name: "",
         schema: [
+          { name: "show_history_controls", selector: { boolean: {} } },
+          { name: "show_distance", selector: { boolean: {} } },
+          { name: "dark_at_night", selector: { boolean: {} } },
           { name: "auto_fit", selector: { boolean: {} } },
           { name: "fit_zones", selector: { boolean: {} } },
           { name: "show_zone_radius", selector: { boolean: {} } },
@@ -590,7 +937,12 @@ class FlexibleMapCardEditor extends LitElement {
       full_width: "Full width",
       card_width: "Card width (when Full width is off)",
       default_zoom: "Default zoom",
-      hours_to_show: "History path (hours)",
+      hours_to_show: "History trail (hours, 0 = off)",
+      units: "Distance units",
+      min_move_m: "Ignore GPS jitter under (meters)",
+      show_history_controls: "Show 1h / 6h / 24h buttons",
+      show_distance: "Show distance legend",
+      dark_at_night: "Dark map after sunset (uses sun.sun)",
       theme_mode: "Theme mode",
       map_style: "Map style",
       auto_fit: "Auto fit",
@@ -624,7 +976,11 @@ class FlexibleMapCardEditor extends LitElement {
       full_width: true,
       card_width: 400,
       default_zoom: 14,
-      hours_to_show: 0,
+      hours_to_show: 24,
+      units: "mi",
+      min_move_m: 20,
+      show_history_controls: true,
+      show_distance: true,
       theme_mode: "auto",
       map_style: "default",
       cluster: true,
