@@ -1,5 +1,5 @@
 {
-  "name": "Flexible Vector Map Card",
+  "name": "Flexible Map",
   "render_readme": true,
-  "filename": "flexible-map-card.js"
+  "homeassistant": "2026.1.0"
 }
