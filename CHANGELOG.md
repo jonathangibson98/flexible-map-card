@@ -1,12 +1,12 @@
 # Changelog
 
-## [2.0.1] - 2026-10-31
+## [3.0.1] - 2026-10-31
 ### Fixed
 * Zone icons (Home, Work, ...) now show on the dashboard map. New card option `show_zones` adds every zone that has a location; the dashboard turns it on.
 * Google Timeline exports (the `Timeline.json` from the phone) now import: visits, trips and path points. Older Takeout "Semantic Location History" files work too.
 * Points that share the same millisecond (common in Google exports) are all kept instead of one being dropped.
 
-## [2.0.0] - 2026-10-31
+## [3.0.0] - 2026-10-31
 First combined release: integration + sidebar dashboard + card in one repo.
 
 ### Added
