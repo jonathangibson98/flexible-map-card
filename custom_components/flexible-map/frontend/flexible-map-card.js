@@ -62,6 +62,7 @@ class FlexibleMapCard extends LitElement {
       map_style: "default",
       hours_to_show: 24,
       history_source: "auto",
+      show_zones: true,
       show_history_controls: true,
       show_distance: true,
       units: "mi",
@@ -126,7 +127,26 @@ class FlexibleMapCard extends LitElement {
   // ------------------------------------------------------------------------
   // Entities (including the "add all entities" toggle)
   // ------------------------------------------------------------------------
+  // Zones (Home, Work, ...) only draw if they're in the entity list, so
+  // `show_zones` adds every zone that has a location.
   _collectEntities() {
+    const base = this._collectBase();
+    if (!this.config?.show_zones || !this.hass) return base;
+    const have = new Set(base.map((e) => (typeof e === "string" ? e : e.entity)));
+    const registry = this.hass.entities || {};
+    const zones = Object.entries(this.hass.states)
+      .filter(
+        ([id, st]) =>
+          id.startsWith("zone.") &&
+          !have.has(id) &&
+          !registry[id]?.hidden &&
+          st.attributes?.latitude !== undefined
+      )
+      .map(([id]) => id);
+    return [...base, ...zones];
+  }
+
+  _collectBase() {
     const configured = this.config.entities || [];
     if (!this.config.add_all_entities || !this.hass) return configured;
 
@@ -782,7 +802,7 @@ class FlexibleMapCard extends LitElement {
       if (this._mapEl) {
         let rebuild = this._themeMode() !== this._lastThemeMode;
         let refetch = false;
-        if (this.config?.add_all_entities) {
+        if (this.config?.add_all_entities || this.config?.show_zones) {
           const key = this._entitiesKeyOf(this._collectEntities());
           if (key !== this._entitiesKey) {
             rebuild = true;
@@ -999,6 +1019,7 @@ class FlexibleMapCardEditor extends LitElement {
         type: "grid",
         name: "",
         schema: [
+          { name: "show_zones", selector: { boolean: {} } },
           { name: "show_history_controls", selector: { boolean: {} } },
           { name: "show_distance", selector: { boolean: {} } },
           { name: "dark_at_night", selector: { boolean: {} } },
@@ -1029,6 +1050,7 @@ class FlexibleMapCardEditor extends LitElement {
       default_zoom: "Default zoom",
       hours_to_show: "History trail (hours, 0 = off)",
       history_source: "Where history comes from",
+      show_zones: "Show zone icons (Home, Work, ...)",
       units: "Distance units",
       min_move_m: "Ignore GPS jitter under (meters)",
       show_history_controls: "Show 1h / 6h / 24h buttons",

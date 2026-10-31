@@ -45,12 +45,18 @@ function toSeconds(v) {
 }
 function parsePoints(data) {
   const out = [];
+  const seen = new Set();
   const push = (ts, lat, lon, acc) => {
     ts = toSeconds(ts);
     lat = Number(lat);
     lon = Number(lon);
     if (ts === null || Number.isNaN(lat) || Number.isNaN(lon)) return;
     if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return;
+    // Google often gives an end and the next start the same millisecond; keep both
+    let k = Math.round(ts * 1000);
+    while (seen.has(k)) k++;
+    seen.add(k);
+    ts = k / 1000;
     const a = Number(acc);
     out.push([ts, lat, lon, Number.isNaN(a) || acc === undefined || acc === null ? null : a]);
   };
@@ -58,9 +64,68 @@ function parsePoints(data) {
     o.timestamp ?? o.timestampMs ?? o.time ?? o.ts ?? o.tst ?? o.t ??
     o.datetime ?? o.date ?? o.isoDateTime ?? o.created_at ?? o.recorded_at ??
     o.last_updated ?? o.lu;
+  // "geo:34.5,-82.5" or "34.5°, -82.5°"
+  const geo = (v) => {
+    if (v && typeof v === "object") v = v.latLng ?? v.latlng;
+    if (!v) return null;
+    const m = String(v).match(/(-?\d+(?:\.\d+)?)\D+?(-?\d+(?:\.\d+)?)/);
+    return m ? [Number(m[1]), Number(m[2])] : null;
+  };
+  // Google Timeline export from the phone (visit / activity / timelinePath)
+  const timelineSegment = (seg) => {
+    const t0 = toSeconds(seg.startTime);
+    const t1 = toSeconds(seg.endTime);
+    if (t0 === null) return;
+    for (const pt of seg.timelinePath || []) {
+      const g = geo(pt.point);
+      const off = Number(pt.durationMinutesOffsetFromStartTime);
+      if (g) push(t0 + (Number.isNaN(off) ? 0 : off) * 60, g[0], g[1], null);
+    }
+    if (seg.visit) {
+      const g = geo(seg.visit.topCandidate?.placeLocation);
+      if (g) {
+        push(t0, g[0], g[1], null);
+        if (t1 !== null) push(t1, g[0], g[1], null);
+      }
+    }
+    if (seg.activity) {
+      const s = geo(seg.activity.start);
+      const e = geo(seg.activity.end);
+      if (s) push(t0, s[0], s[1], null);
+      if (e && t1 !== null) push(t1, e[0], e[1], null);
+    }
+  };
+  // Older Takeout "Semantic Location History" (placeVisit / activitySegment)
+  const semantic = (item) => {
+    const e7 = (l) => (l && l.latitudeE7 !== undefined ? [l.latitudeE7 / 1e7, l.longitudeE7 / 1e7] : null);
+    const v = item.placeVisit;
+    if (v) {
+      const g = e7(v.location);
+      if (g) {
+        push(v.duration?.startTimestamp ?? v.duration?.startTimestampMs, g[0], g[1], null);
+        push(v.duration?.endTimestamp ?? v.duration?.endTimestampMs, g[0], g[1], null);
+      }
+    }
+    const a = item.activitySegment;
+    if (a) {
+      const s = e7(a.startLocation), e = e7(a.endLocation);
+      if (s) push(a.duration?.startTimestamp ?? a.duration?.startTimestampMs, s[0], s[1], null);
+      if (e) push(a.duration?.endTimestamp ?? a.duration?.endTimestampMs, e[0], e[1], null);
+    }
+  };
   const walk = (node) => {
     if (Array.isArray(node)) {
       for (const item of node) {
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          if (item.startTime && (item.timelinePath || item.visit || item.activity)) {
+            timelineSegment(item);
+            continue;
+          }
+          if (item.placeVisit || item.activitySegment) {
+            semantic(item);
+            continue;
+          }
+        }
         if (Array.isArray(item) && item.length >= 3 && typeof item[1] === "number") {
           push(item[0], item[1], item[2], item[3]); // [ts, lat, lon, acc]
         } else if (item && typeof item === "object") {
@@ -231,6 +296,7 @@ class FlexibleMapPanel extends LitElement {
     return {
       type: "custom:flexible-map-card",
       entities: this._chosen,
+      show_zones: true,
       card_height: Math.min(560, Math.max(280, Math.round(window.innerHeight * 0.46))),
       full_width: true,
       hours_to_show: 24,
@@ -589,7 +655,7 @@ class FlexibleMapPanel extends LitElement {
     return html`
       <div class="form">
         <h3>Import a JSON file</h3>
-        <p class="hint">Works with a list of points (lat, lon, time), Google location Records.json, GeoJSON points and OwnTracks exports.</p>
+        <p class="hint">Works with Google Timeline exports (the Timeline.json from your phone), Google Takeout Records.json, a plain list of points (lat, lon, time), GeoJSON points and OwnTracks.</p>
         <label>Which device is it for?
           <select .value=${imp.entity} @change=${(e) => (this._imp = { ...imp, entity: e.target.value })}>
             <option value="">Choose…</option>
