@@ -11,7 +11,7 @@ One repository, one install. It gives Home Assistant:
 ## Install (HACS)
 
 1. HACS > three dots > **Custom repositories**.
-2. Paste `https://github.com/jonathangibson98/flexible-map`, category **Integration**, Add.
+2. Paste `https://github.com/jonathangibson98/flexible-map-card`, category **Integration**, Add.
 3. Download **Flexible Map** and **restart Home Assistant**.
 4. That's it. It sets itself up and **Flexible Map** appears in the sidebar. Open it, go to **Import** > **Copy history** to pull in what Home Assistant already has.
 
