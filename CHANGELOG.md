@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.0.1] - 2026-11-15
+### Fixed
+* The sidebar dashboard now always uses the new card, even if an old copy of the card is still listed under Dashboards > Resources. It shows a note telling you to remove the old one.
+
 ## [4.0.0] - 2026-11-15
 Flexible Map, Mini Tracker and Travel Times combined.
 
