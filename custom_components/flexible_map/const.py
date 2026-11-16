@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "flexible_map"
-VERSION = "4.0.0"
+VERSION = "4.0.1"
 
 URL_BASE = "/flexible_map_static"
 PANEL_URL_PATH = "flexible-map"

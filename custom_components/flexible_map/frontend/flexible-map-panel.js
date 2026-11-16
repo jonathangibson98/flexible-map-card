@@ -284,7 +284,7 @@ class FlexibleMapPanel extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     const url = this.panel?.config?.card_url;
-    if (url && !customElements.get("flexible-map-card")) import(url).catch(() => {});
+    if (url && !customElements.get("fm-map-card-v4")) import(url).then(() => this.requestUpdate()).catch(() => {});
     this._load();
   }
 
@@ -404,7 +404,7 @@ class FlexibleMapPanel extends LitElement {
   }
 
   updated() {
-    const live = this.renderRoot?.querySelector("flexible-map-card.live");
+    const live = this.renderRoot?.querySelector("fm-map-card-v4.live");
     if (live && this._tab === "live") {
       const key = JSON.stringify(this._liveConfig());
       if (key !== this._liveKey || live !== this._liveEl) {
@@ -413,7 +413,7 @@ class FlexibleMapPanel extends LitElement {
         live.setConfig(this._liveConfig());
       }
     }
-    const card = this.renderRoot?.querySelector("flexible-map-card.hist");
+    const card = this.renderRoot?.querySelector("fm-map-card-v4.hist");
     if (!card || this._tab !== "map") return;
     if (card !== this._cardEl) {
       // a fresh card element (e.g. after visiting another tab) needs everything again
@@ -465,7 +465,7 @@ class FlexibleMapPanel extends LitElement {
   }
 
   get _histCard() {
-    return this.renderRoot?.querySelector("flexible-map-card.hist");
+    return this.renderRoot?.querySelector("fm-map-card-v4.hist");
   }
 
   _showTrip(id, trip) {
@@ -732,7 +732,7 @@ class FlexibleMapPanel extends LitElement {
       </div>
       ${chosen.size
         ? html`<div class="mapbox">
-            <flexible-map-card class="hist" .hass=${this.hass} @trails-changed=${this._onTrails}></flexible-map-card>
+            <fm-map-card-v4 class="hist" .hass=${this.hass} @trails-changed=${this._onTrails}></fm-map-card-v4>
           </div>`
         : html`<div class="empty">Pick at least one person above to see where they've been.</div>`}
       ${this._renderTimeline()}`;
@@ -740,7 +740,8 @@ class FlexibleMapPanel extends LitElement {
 
   _renderLive() {
     if (!this._people.length) return html`<div class="empty">No people to show yet.</div>`;
-    return html`<div class="mapbox"><flexible-map-card class="live" .hass=${this.hass}></flexible-map-card></div>
+    return html`<div class="mapbox"><fm-map-card-v4 class="live" .hass=${this.hass}></fm-map-card-v4></div>
+      ${window.__fmOldCard ? html`<p class="status">An old copy of the Flexible Map card is still loaded, so your dashboards show the old card. Delete <code>/local/flexible-map-card.js</code> under Settings > Dashboards > Resources, then reload.</p>` : nothing}
       <p class="hint">Tap someone in the list for their Travel Times. Want this on a dashboard? Add the <b>Flexible Map</b> card.</p>`;
   }
 

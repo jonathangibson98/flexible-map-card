@@ -10,7 +10,7 @@
  */
 import { LitElement, html, css, nothing } from "./vendor/lit.js";
 
-const VERSION = "4.0.0";
+const VERSION = "4.0.1";
 const BASE = new URL(".", import.meta.url).href; // .../flexible_map_static/
 const HOLD_MS = 600;
 const MOVE_TOLERANCE_PX = 10;
@@ -1545,6 +1545,18 @@ class FlexibleMapCardEditor extends LitElement {
   }
 }
 
+// The sidebar dashboard uses its own tag, so an old copy of the card left in
+// Dashboards > Resources (/local/flexible-map-card.js) can't take its place.
+if (!customElements.get("fm-map-card-v4")) {
+  customElements.define("fm-map-card-v4", class extends FlexibleMapCard {});
+}
+if (customElements.get("flexible-map-card") && !customElements.get("fm-map-card-v4-editor")) {
+  console.warn("[flexible-map-card] An old copy of this card is loaded. Delete /local/flexible-map-card.js from Settings > Dashboards > Resources.");
+  window.__fmOldCard = true;
+}
+if (!customElements.get("fm-map-card-v4-editor")) {
+  customElements.define("fm-map-card-v4-editor", class extends FlexibleMapCardEditor {});
+}
 if (!customElements.get("flexible-map-card")) {
   customElements.define("flexible-map-card", FlexibleMapCard);
   customElements.define("flexible-map-card-editor", FlexibleMapCardEditor);
