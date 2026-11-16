@@ -41,8 +41,8 @@ Add it from the dashboard editor (search "Flexible Map"). Everything is in the v
 type: custom:flexible-map-card
 title: Family
 entities:
-  - person.jon
-  - entity: person.mj
+  - person.alex
+  - entity: person.sam
     color: "#f06595"
 card_height: 340
 hours_to_show: 24
@@ -65,8 +65,8 @@ Want something different on the map only? Override it per entity:
 
 ```yaml
 entities:
-  - entity: person.jon
-    picture: /local/people/jon.png   # or icon: custom:jon
+  - entity: person.alex
+    picture: /local/people/alex.png   # or icon: custom:alex
 zones:
   zone.work:
     icon: custom:bitcoin

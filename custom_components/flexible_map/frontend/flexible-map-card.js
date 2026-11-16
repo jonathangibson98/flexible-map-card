@@ -607,7 +607,7 @@ class FlexibleMapCard extends LitElement {
     return out;
   }
 
-  // Travel Times names people its own way ("Jon"); map them to entities.
+  // Travel Times names people its own way ("Alex"); map them to entities.
   _nameMap(sensors) {
     const map = {};
     for (const { a } of sensors) {
