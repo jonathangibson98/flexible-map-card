@@ -8,14 +8,17 @@ import time
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
+    CONF_HEARTBEAT,
     CONF_MAX_ACCURACY,
     CONF_MIN_DISTANCE,
     CONF_MIN_SECONDS,
     CONF_RETENTION,
     CONF_TRACKED,
+    SIGNAL_POINT,
 )
 from .store import LocationStore, haversine_m
 
@@ -34,6 +37,23 @@ class Tracker:
         self._last: dict[str, tuple | None] = {}
         self._lock = asyncio.Lock()
         self._unsubs: list[CALLBACK_TYPE] = []
+
+    def tracked_ids(self) -> list[str]:
+        """Who is being recorded right now."""
+        if self._tracked:
+            return sorted(self._tracked)
+        return sorted(
+            s.entity_id for s in self.hass.states.async_all("person")
+        )
+
+    async def async_add_external(self, entity_id: str, ts: float, lat: float, lon: float, acc) -> bool:
+        """A point posted to the ingest URL (OwnTracks, Overland, curl ...)."""
+        await self.hass.async_add_executor_job(
+            self.store.add_point, entity_id, ts, float(lat), float(lon), acc
+        )
+        self._last.pop(entity_id, None)
+        async_dispatcher_send(self.hass, f"{SIGNAL_POINT}_{entity_id}")
+        return True
 
     def is_tracked(self, entity_id: str) -> bool:
         if self._tracked:
@@ -78,12 +98,19 @@ class Tracker:
                         return
                     if ts - last_ts < self.options[CONF_MIN_SECONDS]:
                         return
-                    if haversine_m(last_lat, last_lon, lat, lon) < self.options[CONF_MIN_DISTANCE]:
+                    moved = haversine_m(last_lat, last_lon, lat, lon)
+                    # Standing still still gets a point every few minutes, so a
+                    # stop has a real length on the timeline.
+                    beat = self.options[CONF_HEARTBEAT] * 60
+                    if moved < self.options[CONF_MIN_DISTANCE] and not (
+                        beat and ts - last_ts >= beat
+                    ):
                         return
                 self._last[entity_id] = (ts, lat, lon)
                 await self.hass.async_add_executor_job(
                     self.store.add_point, entity_id, ts, float(lat), float(lon), acc
                 )
+            async_dispatcher_send(self.hass, f"{SIGNAL_POINT}_{entity_id}")
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Could not save a location point for %s", entity_id)
 

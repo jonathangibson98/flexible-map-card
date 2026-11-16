@@ -7,11 +7,13 @@ from pathlib import Path
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from . import websocket
+from .ingest import IngestView, async_get_token
 from .const import (
     DB_FILE,
     DB_FOLDER,
@@ -29,6 +31,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
+PLATFORMS = [Platform.SENSOR]
 CARD_URL = f"{URL_BASE}/flexible-map-card.js?v={VERSION}"
 PANEL_URL = f"{URL_BASE}/flexible-map-panel.js?v={VERSION}"
 
@@ -70,7 +73,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ]
         )
         websocket.async_register(hass)
+        hass.http.register_view(IngestView(hass))
         domain_data["ui_ready"] = True
+    await async_get_token(hass)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # The card works on every dashboard without adding a resource by hand
     frontend.add_extra_js_url(hass, CARD_URL)
@@ -98,6 +104,7 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop recording and take the dashboard away."""
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     runtime = hass.data.get(DOMAIN, {}).pop("runtime", None)
     if runtime:
         runtime["tracker"].async_stop()

@@ -21,7 +21,12 @@
           "min_distance_m": "Only save a point after moving at least (m)",
           "min_seconds": "Only save a point at least this far apart in time (s)",
           "max_accuracy_m": "Ignore points less accurate than (m, 0 = off)",
-          "retention_days": "Delete history older than (days, 0 = keep forever)"
+          "retention_days": "Delete history older than (days, 0 = keep forever)",
+          "heartbeat_minutes": "While standing still, still save a point every (minutes, 0 = off)",
+          "stop_minutes": "A stop on the timeline is at least (minutes)",
+          "stop_radius_m": "...within this many meters",
+          "create_sensors": "Create \"place\" and \"distance today\" sensors for each person",
+          "ingest_enabled": "Turn on the ingest URL (OwnTracks, Overland, other apps)"
         }
       }
     }
