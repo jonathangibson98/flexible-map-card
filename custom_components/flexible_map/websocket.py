@@ -13,16 +13,25 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_HEARTBEAT,
+    CONF_INGEST,
     CONF_MAX_ACCURACY,
     CONF_MIN_DISTANCE,
     CONF_MIN_SECONDS,
     CONF_RETENTION,
+    CONF_SENSORS,
+    CONF_STOP_MINUTES,
+    CONF_STOP_RADIUS,
     CONF_TRACKED,
     CONF_UNITS,
     DOMAIN,
+    INGEST_URL,
     VERSION,
     merged_options,
 )
+from .geo import build_timeline, place_stats, simplify
+from .ingest import async_get_token
+from .places import zone_places
 
 MAX_IMPORT_BATCH = 5000
 
@@ -57,6 +66,10 @@ def async_register(hass: HomeAssistant) -> None:
         ws_import_points,
         ws_delete_range,
         ws_set_options,
+        ws_timeline,
+        ws_place_stats,
+        ws_export,
+        ws_ingest_info,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -68,7 +81,12 @@ async def ws_config(hass, connection, msg) -> None:
     if runtime is None:
         return
     connection.send_result(
-        msg["id"], {"version": VERSION, "options": merged_options(runtime["entry"])}
+        msg["id"],
+        {
+            "version": VERSION,
+            "options": merged_options(runtime["entry"]),
+            "tracked": runtime["tracker"].tracked_ids(),
+        },
     )
 
 
@@ -167,6 +185,11 @@ async def ws_delete_range(hass, connection, msg) -> None:
         "min_seconds": object,
         "max_accuracy_m": object,
         "retention_days": object,
+        "heartbeat_minutes": object,
+        "stop_minutes": object,
+        "stop_radius_m": object,
+        "create_sensors": bool,
+        "ingest_enabled": bool,
     }
 )
 @websocket_api.require_admin
@@ -180,10 +203,119 @@ async def ws_set_options(hass, connection, msg) -> None:
         new[CONF_TRACKED] = [e for e in msg["tracked_entities"] if "." in e]
     if msg.get("units") in ("mi", "km"):
         new[CONF_UNITS] = msg["units"]
-    for key in (CONF_MIN_DISTANCE, CONF_MIN_SECONDS, CONF_MAX_ACCURACY, CONF_RETENTION):
+    for key in (
+        CONF_MIN_DISTANCE,
+        CONF_MIN_SECONDS,
+        CONF_MAX_ACCURACY,
+        CONF_RETENTION,
+        CONF_HEARTBEAT,
+        CONF_STOP_MINUTES,
+        CONF_STOP_RADIUS,
+    ):
         value = _num(msg.get(key))
         if value is not None and value >= 0:
             new[key] = int(value)
+    for key in (CONF_SENSORS, CONF_INGEST):
+        if isinstance(msg.get(key), bool):
+            new[key] = msg[key]
     # Saving triggers a reload of the integration (see __init__.py)
     hass.config_entries.async_update_entry(runtime["entry"], options=new)
     connection.send_result(msg["id"], {"saved": True})
+
+
+def _stop_settings(runtime, msg) -> tuple[int, float]:
+    opts = runtime["options"]
+    minutes = _num(msg.get("stop_minutes"), opts[CONF_STOP_MINUTES]) or opts[CONF_STOP_MINUTES]
+    radius = _num(msg.get("stop_radius_m"), opts[CONF_STOP_RADIUS]) or opts[CONF_STOP_RADIUS]
+    return int(max(1, minutes) * 60), float(max(10, radius))
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "flexible_map/timeline",
+        "entity_id": str,
+        "start": object,
+        "end": object,
+        "stop_minutes": object,
+        "stop_radius_m": object,
+    }
+)
+@websocket_api.async_response
+async def ws_timeline(hass, connection, msg) -> None:
+    """Stops (matched to zones) and the trips between them, with distance and speed."""
+    runtime = _runtime(hass, connection, msg)
+    if runtime is None:
+        return
+    end = _seconds(msg.get("end")) or time.time()
+    start = _seconds(msg.get("start")) or end - 86400
+    pts = await hass.async_add_executor_job(
+        runtime["store"].points, msg["entity_id"], start, end
+    )
+    min_stay, radius = _stop_settings(runtime, msg)
+    places = zone_places(hass)
+    result = await hass.async_add_executor_job(build_timeline, list(pts), places, min_stay, radius)
+    for s in result["stays"]:
+        for k in ("i0", "i1"):
+            s.pop(k, None)
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {"type": "flexible_map/place_stats", "entity_id": str, "days": object}
+)
+@websocket_api.async_response
+async def ws_place_stats(hass, connection, msg) -> None:
+    """Total time and visits per zone over the last N days."""
+    runtime = _runtime(hass, connection, msg)
+    if runtime is None:
+        return
+    days = max(1, min(3650, int(_num(msg.get("days"), 30) or 30)))
+    end = time.time()
+    pts = await hass.async_add_executor_job(
+        runtime["store"].points, msg["entity_id"], end - days * 86400, end
+    )
+    min_stay, radius = _stop_settings(runtime, {})
+    stats = await hass.async_add_executor_job(
+        place_stats, list(pts), zone_places(hass), min_stay, radius
+    )
+    connection.send_result(msg["id"], {"days": days, "places": stats})
+
+
+@websocket_api.websocket_command(
+    {"type": "flexible_map/export", "entity_id": str, "start": object, "end": object, "simplify_m": object}
+)
+@websocket_api.async_response
+async def ws_export(hass, connection, msg) -> None:
+    """Raw points for a download (the dashboard turns them into GPX / CSV / JSON)."""
+    runtime = _runtime(hass, connection, msg)
+    if runtime is None:
+        return
+    start = _seconds(msg.get("start")) or 0
+    end = _seconds(msg.get("end")) or time.time() + 86400
+    pts = await hass.async_add_executor_job(
+        runtime["store"].points, msg["entity_id"], start, end
+    )
+    tol = _num(msg.get("simplify_m"), 0) or 0
+    if tol > 0:
+        pts = await hass.async_add_executor_job(simplify, list(pts), tol, 200000)
+    connection.send_result(msg["id"], {"points": [list(p) for p in pts]})
+
+
+@websocket_api.websocket_command(
+    {"type": "flexible_map/ingest_info", "regenerate": bool}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_ingest_info(hass, connection, msg) -> None:
+    runtime = _runtime(hass, connection, msg)
+    if runtime is None:
+        return
+    token = await async_get_token(hass, bool(msg.get("regenerate")))
+    connection.send_result(
+        msg["id"],
+        {
+            "enabled": runtime["options"][CONF_INGEST],
+            "path": INGEST_URL,
+            "token": token,
+        },
+    )

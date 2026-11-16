@@ -1,9 +1,4 @@
-import {
-  LitElement,
-  html,
-  css,
-  nothing,
-} from "https://unpkg.com/lit@3.2.1/index.js?module";
+import { LitElement, html, css, nothing } from "./vendor/lit.js";
 
 const LOGO = "/flexible_map_static/logo.svg";
 const MI = 1609.344;
@@ -15,9 +10,10 @@ const RANGES = [
   ["custom", "Pick dates"],
 ];
 const TABS = [
-  ["map", "Map"],
+  ["live", "Live"],
+  ["map", "History"],
   ["places", "Places"],
-  ["import", "Import"],
+  ["import", "Data"],
   ["settings", "Settings"],
 ];
 
@@ -160,6 +156,80 @@ function parsePoints(data) {
   return out;
 }
 
+// GPX tracks / waypoints
+function parseGPX(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  const out = [];
+  for (const el of doc.querySelectorAll("trkpt, rtept, wpt")) {
+    const lat = Number(el.getAttribute("lat"));
+    const lon = Number(el.getAttribute("lon"));
+    const t = el.querySelector("time")?.textContent;
+    const ts = toSeconds(t);
+    if (ts !== null && !Number.isNaN(lat) && !Number.isNaN(lon)) out.push([ts, lat, lon, null]);
+  }
+  return out;
+}
+// CSV with lat / lon / time columns (any order, common names)
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const sep = lines[0].includes(";") && !lines[0].includes(",") ? ";" : lines[0].includes("\t") ? "\t" : ",";
+  const head = lines[0].split(sep).map((h) => h.trim().replace(/^"|"$/g, "").toLowerCase());
+  const find = (...names) => head.findIndex((h) => names.includes(h));
+  const iLat = find("lat", "latitude");
+  const iLon = find("lon", "lng", "long", "longitude");
+  const iT = find("time", "timestamp", "ts", "date", "datetime", "recorded_at", "last_updated", "tst");
+  const iA = find("acc", "accuracy", "gps_accuracy");
+  if (iLat < 0 || iLon < 0 || iT < 0) return [];
+  const out = [];
+  for (const line of lines.slice(1)) {
+    const c = line.split(sep).map((x) => x.trim().replace(/^"|"$/g, ""));
+    const ts = toSeconds(c[iT]);
+    const lat = Number(c[iLat]);
+    const lon = Number(c[iLon]);
+    if (ts === null || Number.isNaN(lat) || Number.isNaN(lon)) continue;
+    out.push([ts, lat, lon, iA >= 0 && c[iA] !== "" ? Number(c[iA]) : null]);
+  }
+  return out;
+}
+// OwnTracks .rec: "2024-01-01T10:00:00Z  *  {json}"
+function parseRec(text) {
+  const items = [];
+  for (const line of text.split(/\r?\n/)) {
+    const i = line.indexOf("{");
+    if (i < 0) continue;
+    try {
+      const o = JSON.parse(line.slice(i));
+      if (o._type === "location") items.push(o);
+    } catch (e) { /* skip */ }
+  }
+  return parsePoints(items);
+}
+function parseAny(name, text) {
+  const n = name.toLowerCase();
+  const t = text.trimStart();
+  if (n.endsWith(".gpx") || t.startsWith("<")) return parseGPX(text);
+  if (n.endsWith(".rec")) return parseRec(text);
+  if (n.endsWith(".csv") || n.endsWith(".tsv") || !/^[[{]/.test(t)) return parseCSV(text);
+  return parsePoints(JSON.parse(text));
+}
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+const iso = (ts) => new Date(ts * 1000).toISOString();
+const fmtDur = (s) => {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+};
+
 class FlexibleMapPanel extends LitElement {
   static get properties() {
     return {
@@ -180,12 +250,20 @@ class FlexibleMapPanel extends LitElement {
       _msg: { state: true },
       _place: { state: true },
       _imp: { state: true },
+      _tl: { state: true },
+      _pstats: { state: true },
+      _ingest: { state: true },
+      _exp: { state: true },
     };
   }
 
   constructor() {
     super();
-    this._tab = "map";
+    this._tab = "live";
+    this._tl = {}; // entity -> server timeline
+    this._pstats = { entity: "", days: 30, rows: null, busy: false };
+    this._ingest = null;
+    this._exp = { entity: "", range: "all" };
     this._selected = null; // null = everyone
     this._range = "today";
     this._from = ymd(new Date());
@@ -302,18 +380,40 @@ class FlexibleMapPanel extends LitElement {
       hours_to_show: 24,
       show_history_controls: false,
       show_distance: false,
+      show_people: false,
+      travel_times: false,
       units: this._units,
       auto_fit: true,
       show_zone_radius: true,
       dark_at_night: true,
       default_zoom: 14,
-      cluster: false,
-      hide_orient_buttons: false,
+    };
+  }
+
+  _liveConfig() {
+    return {
+      type: "custom:flexible-map-card",
+      entities: this._people.map((p) => p.id),
+      card_height: Math.min(620, Math.max(300, Math.round(window.innerHeight * 0.55))),
+      hours_to_show: 6,
+      units: this._units,
+      dark_at_night: true,
+      show_people: true,
+      travel_times: true,
     };
   }
 
   updated() {
-    const card = this.renderRoot?.querySelector("flexible-map-card");
+    const live = this.renderRoot?.querySelector("flexible-map-card.live");
+    if (live && this._tab === "live") {
+      const key = JSON.stringify(this._liveConfig());
+      if (key !== this._liveKey || live !== this._liveEl) {
+        this._liveKey = key;
+        this._liveEl = live;
+        live.setConfig(this._liveConfig());
+      }
+    }
+    const card = this.renderRoot?.querySelector("flexible-map-card.hist");
     if (!card || this._tab !== "map") return;
     if (card !== this._cardEl) {
       // a fresh card element (e.g. after visiting another tab) needs everything again
@@ -344,6 +444,51 @@ class FlexibleMapPanel extends LitElement {
     const colors = {};
     for (const t of trails) colors[t.id] = t.color;
     this._colors = colors;
+    this._loadTimelines();
+  }
+
+  // Stops + trips from the integration (stop detection, speed, matched zones)
+  async _loadTimelines() {
+    const w = this._window;
+    const key = `${this._chosen.join(",")}|${Math.floor(+w.start / 60000)}|${Math.floor(+w.end / 60000)}`;
+    if (key === this._tlKey) return;
+    this._tlKey = key;
+    const out = {};
+    await Promise.all(this._chosen.map(async (id) => {
+      try {
+        out[id] = await this.hass.callWS({ type: "flexible_map/timeline", entity_id: id, start: +w.start / 1000, end: +w.end / 1000 });
+      } catch (e) {
+        out[id] = null;
+      }
+    }));
+    if (key === this._tlKey) this._tl = out;
+  }
+
+  get _histCard() {
+    return this.renderRoot?.querySelector("flexible-map-card.hist");
+  }
+
+  _showTrip(id, trip) {
+    const t = this._trails.find((x) => x.id === id);
+    const pts = (t?.points || [])
+      .filter((p) => +p.timestamp >= trip.start * 1000 - 1000 && +p.timestamp <= trip.end * 1000 + 1000)
+      .map((p) => p.point);
+    const line = pts.length > 1 ? pts : [trip.from_pt, trip.to_pt];
+    this._histCard?.showPath(line, this._colors[id] || "#ff4081");
+  }
+
+  _showStop(s) {
+    this._histCard?.showPoint(s.lat, s.lon, s.place || "Stop");
+  }
+
+  _speed(mph) {
+    return this._units === "km" ? `${Math.round(mph * 1.609344)} km/h` : `${Math.round(mph)} mph`;
+  }
+
+  // Unknown stop -> prefill the "Add a place" form
+  _saveStopAsPlace(s) {
+    this._place = { id: null, name: "", lat: s.lat.toFixed(6), lon: s.lon.toFixed(6), feet: 330, icon: "" };
+    this._tab = "places";
   }
 
   // ---- timeline: group points by the zone they were in ----------------------
@@ -442,10 +587,10 @@ class FlexibleMapPanel extends LitElement {
     const file = ev.target.files?.[0];
     if (!file) return;
     try {
-      const pts = parsePoints(JSON.parse(await file.text()));
+      const pts = parseAny(file.name, await file.text());
       this._imp = { ...this._imp, file: file.name, points: pts, log: pts.length ? "" : "No locations found in that file." };
     } catch (e) {
-      this._imp = { ...this._imp, file: file.name, points: null, log: "That doesn't look like a JSON file." };
+      this._imp = { ...this._imp, file: file.name, points: null, log: "Couldn't read that file (JSON, GPX, CSV or OwnTracks .rec)." };
     }
   }
   async _sendBatches(entity, points, onProgress) {
@@ -511,6 +656,15 @@ class FlexibleMapPanel extends LitElement {
   }
 
   // ---- settings -------------------------------------------------------------
+  _openTab(k) {
+    if (k === "settings") return this._openSettings();
+    this._tab = k;
+    if (k === "import") {
+      this.hass.callWS({ type: "flexible_map/stats" }).then((s) => (this._stats = s)).catch(() => {});
+      if (this._admin) this._loadIngest();
+    }
+  }
+
   async _openSettings() {
     this._tab = "settings";
     try {
@@ -530,6 +684,11 @@ class FlexibleMapPanel extends LitElement {
         min_seconds: Number(d.min_seconds),
         max_accuracy_m: Number(d.max_accuracy_m),
         retention_days: Number(d.retention_days),
+        heartbeat_minutes: Number(d.heartbeat_minutes),
+        stop_minutes: Number(d.stop_minutes),
+        stop_radius_m: Number(d.stop_radius_m),
+        create_sensors: !!d.create_sensors,
+        ingest_enabled: !!d.ingest_enabled,
       });
       this._msg = "Saved. Flexible Map is restarting itself with the new settings.";
       setTimeout(() => this._load(), 2500);
@@ -573,10 +732,16 @@ class FlexibleMapPanel extends LitElement {
       </div>
       ${chosen.size
         ? html`<div class="mapbox">
-            <flexible-map-card .hass=${this.hass} @trails-changed=${this._onTrails}></flexible-map-card>
+            <flexible-map-card class="hist" .hass=${this.hass} @trails-changed=${this._onTrails}></flexible-map-card>
           </div>`
         : html`<div class="empty">Pick at least one person above to see where they've been.</div>`}
       ${this._renderTimeline()}`;
+  }
+
+  _renderLive() {
+    if (!this._people.length) return html`<div class="empty">No people to show yet.</div>`;
+    return html`<div class="mapbox"><flexible-map-card class="live" .hass=${this.hass}></flexible-map-card></div>
+      <p class="hint">Tap someone in the list for their Travel Times. Want this on a dashboard? Add the <b>Flexible Map</b> card.</p>`;
   }
 
   _renderTimeline() {
@@ -586,6 +751,8 @@ class FlexibleMapPanel extends LitElement {
     }
     return html`<div class="timelines">
       ${trails.map((t) => {
+        const tl = this._tl[t.id];
+        if (tl && (tl.stays.length || tl.trips.length)) return this._renderServerTimeline(t, tl);
         const segs = this._segments(t);
         return html`<section class="tl" style="--c:${t.color}">
           <h3><span class="dot"></span>${t.name}<span class="total">${this._dist(t.distM)}</span></h3>
@@ -601,6 +768,67 @@ class FlexibleMapPanel extends LitElement {
     </div>`;
   }
 
+  _renderServerTimeline(t, tl) {
+    const items = [
+      ...tl.stays.map((s) => ({ kind: "stay", start: s.start, s })),
+      ...tl.trips.map((s) => ({ kind: "trip", start: s.start, s })),
+    ].sort((a, b) => a.start - b.start);
+    const sum = tl.summary;
+    const when = (ts) => this._t(new Date(ts * 1000));
+    return html`<section class="tl" style="--c:${t.color}">
+      <h3><span class="dot"></span>${t.name}<span class="total">${this._dist(sum.distance_m)}</span></h3>
+      <p class="muted sum">${sum.stops} stops · moving ${fmtDur(sum.moving_s)}</p>
+      <ol>
+        ${items.map((it) => it.kind === "stay"
+          ? html`<li class="stay" @click=${() => this._showStop(it.s)}>
+              <span class="what"><ha-icon icon="mdi:map-marker"></ha-icon> ${it.s.place || "Unknown place"}</span>
+              <span class="when">${when(it.s.start)} – ${when(it.s.end)}</span>
+              <span class="more">${fmtDur(it.s.duration)}</span>
+              ${!it.s.place && this._admin ? html`<button class="mini" @click=${(e) => { e.stopPropagation(); this._saveStopAsPlace(it.s); }}>Save as place</button>` : nothing}
+            </li>`
+          : html`<li class="trip" @click=${() => this._showTrip(t.id, it.s)}>
+              <span class="what"><ha-icon icon="mdi:car"></ha-icon> ${it.s.from || "…"} → ${it.s.to || "…"}</span>
+              <span class="when">${when(it.s.start)} · ${fmtDur(it.s.duration)} · ${this._speed(it.s.avg_mph)}</span>
+              <span class="more">${this._dist(it.s.distance_m)}</span>
+            </li>`)}
+      </ol>
+    </section>`;
+  }
+
+  async _loadPlaceStats() {
+    const ps = this._pstats;
+    const entity = ps.entity || this._people[0]?.id;
+    if (!entity) return;
+    this._pstats = { ...ps, entity, busy: true };
+    try {
+      const r = await this.hass.callWS({ type: "flexible_map/place_stats", entity_id: entity, days: Number(ps.days) });
+      this._pstats = { ...this._pstats, rows: r.places, busy: false };
+    } catch (e) {
+      this._pstats = { ...this._pstats, rows: [], busy: false };
+    }
+  }
+
+  _renderPlaceStats() {
+    const ps = this._pstats;
+    const people = this._people;
+    const max = Math.max(1, ...(ps.rows || []).map((r) => r.seconds));
+    return html`<div class="form">
+      <h3>Time at places</h3>
+      <div class="two">
+        <label>Who <select .value=${ps.entity || people[0]?.id || ""} @change=${(e) => { this._pstats = { ...ps, entity: e.target.value, rows: null }; this._loadPlaceStats(); }}>
+          ${people.map((x) => html`<option value=${x.id}>${x.name}</option>`)}</select></label>
+        <label>Over the last <select .value=${String(ps.days)} @change=${(e) => { this._pstats = { ...ps, days: Number(e.target.value), rows: null }; this._loadPlaceStats(); }}>
+          <option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">year</option></select></label>
+      </div>
+      ${ps.rows === null ? html`<div class="btns"><button @click=${this._loadPlaceStats}>Show</button></div>`
+        : ps.rows.length ? html`<ul class="bars">${ps.rows.map((r) => html`<li>
+            <span class="nm">${r.name}</span>
+            <span class="bar"><i style="width:${(r.seconds / max) * 100}%"></i></span>
+            <span class="v">${fmtDur(r.seconds)} · ${r.visits} visit${r.visits === 1 ? "" : "s"}</span></li>`)}</ul>`
+        : html`<p class="hint">No stops at your places in that range.</p>`}
+    </div>`;
+  }
+
   _renderPlaces() {
     const stored = this._zones;
     const states = Object.values(this.hass.states).filter((s) => s.entity_id.startsWith("zone."));
@@ -613,8 +841,8 @@ class FlexibleMapPanel extends LitElement {
           const item = stored.find((z) => z.name === (s.attributes.friendly_name || ""));
           const r = Number(s.attributes.radius) || 0;
           return html`<li>
-            <div><b>${s.attributes.friendly_name || s.entity_id}</b>
-              <span class="muted">${Math.round(r * 3.28084)} ft radius${item ? "" : " · set in configuration"}</span></div>
+            <div class="zrow"><ha-icon icon=${s.attributes.icon || "mdi:map-marker"}></ha-icon><div><b>${s.attributes.friendly_name || s.entity_id}</b>
+              <span class="muted">${Math.round(r * 3.28084)} ft radius${item ? "" : " · set in configuration"}</span></div></div>
             ${item && this._admin ? html`<div class="btns">
               <button @click=${() => (this._place = { id: item.id, name: item.name, lat: item.latitude, lon: item.longitude, feet: Math.round(item.radius * 3.28084), icon: item.icon || "" })}>Edit</button>
               <button class="danger" @click=${() => this._deletePlace(item)}>Delete</button></div>` : nothing}
@@ -639,7 +867,8 @@ class FlexibleMapPanel extends LitElement {
         </div>
         <div class="btns"><button class="primary" @click=${this._savePlace}>${p.id ? "Save changes" : "Add place"}</button>
           ${p.id ? html`<button @click=${() => (this._place = { id: null, name: "", lat: "", lon: "", feet: 330, icon: "" })}>Cancel</button>` : nothing}</div>
-      </div>` : html`<p class="hint">Ask an admin to add or change places.</p>`}`;
+      </div>` : html`<p class="hint">Ask an admin to add or change places.</p>`}
+      ${this._renderPlaceStats()}`;
   }
 
   _renderImport() {
@@ -654,8 +883,8 @@ class FlexibleMapPanel extends LitElement {
     if (!this._admin) return html`<p class="hint">Only admins can import history.</p>`;
     return html`
       <div class="form">
-        <h3>Import a JSON file</h3>
-        <p class="hint">Works with Google Timeline exports (the Timeline.json from your phone), Google Takeout Records.json, a plain list of points (lat, lon, time), GeoJSON points and OwnTracks.</p>
+        <h3>Import a history file</h3>
+        <p class="hint">Google Timeline (the Timeline.json from your phone), Google Takeout Records.json, GPX, CSV (lat, lon, time columns), GeoJSON, OwnTracks .rec, or any JSON list of points.</p>
         <label>Which device is it for?
           <select .value=${imp.entity} @change=${(e) => (this._imp = { ...imp, entity: e.target.value })}>
             <option value="">Choose…</option>
@@ -663,7 +892,7 @@ class FlexibleMapPanel extends LitElement {
           </select></label>
         <label>…or type a name for another device
           <input placeholder="device_tracker.old_phone" .value=${imp.custom} @input=${(e) => (this._imp = { ...imp, custom: e.target.value })} /></label>
-        <label>File <input type="file" accept=".json,application/json" @change=${this._pickFile} /></label>
+        <label>File <input type="file" accept=".json,.geojson,.gpx,.csv,.tsv,.rec,.txt" @change=${this._pickFile} /></label>
         ${pts?.length ? html`<p>Found <b>${pts.length.toLocaleString()}</b> locations from ${range}.</p>` : nothing}
         <div class="btns"><button class="primary" ?disabled=${imp.busy || !pts?.length || !(imp.custom.trim() || imp.entity)} @click=${this._runImport}>Import</button></div>
       </div>
@@ -673,7 +902,77 @@ class FlexibleMapPanel extends LitElement {
         <label>Days to copy <input type="number" min="1" max="60" .value=${String(imp.days)} @input=${(e) => (this._imp = { ...imp, days: e.target.value })} /></label>
         <div class="btns"><button ?disabled=${imp.busy} @click=${this._backfill}>Copy history</button></div>
       </div>
-      ${imp.log ? html`<p class="status">${imp.log}</p>` : nothing}`;
+      ${imp.log ? html`<p class="status">${imp.log}</p>` : nothing}
+      ${this._renderExport()}
+      ${this._renderIngest()}`;
+  }
+
+  _allHistoryIds() {
+    const ids = new Set(this._people.map((p) => p.id));
+    for (const id of Object.keys(this._stats?.entities || {})) ids.add(id);
+    return [...ids];
+  }
+
+  async _export(fmt) {
+    const id = this._exp.entity || this._allHistoryIds()[0];
+    if (!id) return;
+    const now = Date.now() / 1000;
+    const start = { all: 0, "30": now - 30 * 86400, "7": now - 7 * 86400, today: dayStart(new Date()) / 1000 }[this._exp.range] ?? 0;
+    this._msg = "Preparing download…";
+    try {
+      const { points } = await this.hass.callWS({ type: "flexible_map/export", entity_id: id, start, end: now + 60 });
+      const base = `${id.replace(/\W+/g, "_")}_${ymd(new Date())}`;
+      if (fmt === "gpx") {
+        const pts = points.map((p) => `<trkpt lat="${p[1]}" lon="${p[2]}"><time>${iso(p[0])}</time></trkpt>`).join("\n");
+        download(`${base}.gpx`, `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Flexible Map" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${id}</name><trkseg>\n${pts}\n</trkseg></trk></gpx>\n`, "application/gpx+xml");
+      } else if (fmt === "csv") {
+        download(`${base}.csv`, "time,lat,lon,accuracy\n" + points.map((p) => `${iso(p[0])},${p[1]},${p[2]},${p[3] ?? ""}`).join("\n") + "\n", "text/csv");
+      } else {
+        download(`${base}.json`, JSON.stringify({ entity_id: id, points: points.map((p) => ({ time: iso(p[0]), lat: p[1], lon: p[2], accuracy: p[3] })) }, null, 1), "application/json");
+      }
+      this._msg = `Downloaded ${points.length.toLocaleString()} points.`;
+    } catch (e) {
+      this._msg = `Export failed: ${e.message || e.code}`;
+    }
+  }
+
+  _renderExport() {
+    const ids = this._allHistoryIds();
+    const ex = this._exp;
+    return html`<div class="form">
+      <h3>Export</h3>
+      <div class="two">
+        <label>Who <select .value=${ex.entity || ids[0] || ""} @change=${(e) => (this._exp = { ...ex, entity: e.target.value })}>
+          ${ids.map((id) => html`<option value=${id}>${this.hass.states[id]?.attributes?.friendly_name || id}</option>`)}</select></label>
+        <label>Range <select .value=${ex.range} @change=${(e) => (this._exp = { ...ex, range: e.target.value })}>
+          <option value="all">Everything</option><option value="30">Last 30 days</option><option value="7">Last 7 days</option><option value="today">Today</option></select></label>
+      </div>
+      <div class="btns"><button @click=${() => this._export("gpx")}>GPX</button><button @click=${() => this._export("csv")}>CSV</button><button @click=${() => this._export("json")}>JSON</button></div>
+    </div>`;
+  }
+
+  async _loadIngest(regenerate = false) {
+    try {
+      this._ingest = await this.hass.callWS({ type: "flexible_map/ingest_info", regenerate });
+    } catch (e) {
+      this._ingest = null;
+    }
+  }
+
+  _renderIngest() {
+    const ig = this._ingest;
+    if (!ig) return nothing;
+    const url = `${location.origin}${ig.path}?token=${ig.token}`;
+    return html`<div class="form">
+      <h3>Other apps (OwnTracks, Overland, anything that can POST JSON)</h3>
+      ${ig.enabled ? html`
+        <p class="hint">Send locations to this URL. Each device shows up as <code>ext.&lt;name&gt;</code> in your history. Keep the token secret.</p>
+        <label>URL <input readonly .value=${url} @focus=${(e) => e.target.select()} /></label>
+        <p class="hint">OwnTracks: Mode HTTP, paste the URL. Overland: paste the URL and add <code>&amp;device_id=my-phone</code>.
+          Anything else: <code>{"device":"my gps","lat":34.5,"lon":-82.6}</code></p>
+        <div class="btns"><button @click=${() => confirm("Make a new token? The old URL stops working.") && this._loadIngest(true)}>New token</button></div>`
+      : html`<p class="hint">Off. Turn on "Ingest URL" in Settings to get a URL.</p>`}
+    </div>`;
   }
 
   _renderSettings() {
@@ -701,7 +1000,20 @@ class FlexibleMapPanel extends LitElement {
           <label>Save a point after moving (meters) <input type="number" .value=${String(d.min_distance_m)} ?disabled=${!this._admin} @input=${set("min_distance_m")} /></label>
           <label>…and at least (seconds) apart <input type="number" .value=${String(d.min_seconds)} ?disabled=${!this._admin} @input=${set("min_seconds")} /></label>
         </div>
-        <label>Ignore points less accurate than (meters, 0 = off) <input type="number" .value=${String(d.max_accuracy_m)} ?disabled=${!this._admin} @input=${set("max_accuracy_m")} /></label>
+        <div class="two">
+          <label>Ignore points less accurate than (meters, 0 = off) <input type="number" .value=${String(d.max_accuracy_m)} ?disabled=${!this._admin} @input=${set("max_accuracy_m")} /></label>
+          <label>While standing still, save a point every (minutes, 0 = off) <input type="number" .value=${String(d.heartbeat_minutes ?? 10)} ?disabled=${!this._admin} @input=${set("heartbeat_minutes")} /></label>
+        </div>
+        <h3>Timeline stops</h3>
+        <div class="two">
+          <label>A stop is at least (minutes) <input type="number" .value=${String(d.stop_minutes ?? 10)} ?disabled=${!this._admin} @input=${set("stop_minutes")} /></label>
+          <label>…within (meters) <input type="number" .value=${String(d.stop_radius_m ?? 75)} ?disabled=${!this._admin} @input=${set("stop_radius_m")} /></label>
+        </div>
+        <h3>Extras</h3>
+        <div class="checks">
+          <label><input type="checkbox" .checked=${d.create_sensors !== false} ?disabled=${!this._admin} @change=${(e) => (this._draft = { ...d, create_sensors: e.target.checked })} /> "Place" and "distance today" sensors for each person</label>
+          <label><input type="checkbox" .checked=${!!d.ingest_enabled} ?disabled=${!this._admin} @change=${(e) => (this._draft = { ...d, ingest_enabled: e.target.checked })} /> Ingest URL for other apps (OwnTracks, Overland)</label>
+        </div>
         <div class="btns"><button class="primary" ?disabled=${!this._admin} @click=${this._saveSettings}>Save settings</button></div>
       </div>
       <div class="form">
@@ -725,11 +1037,12 @@ class FlexibleMapPanel extends LitElement {
       </header>
       <nav>
         ${TABS.map(([k, label]) => html`<button class=${this._tab === k ? "tab on" : "tab"}
-          @click=${() => (k === "settings" ? this._openSettings() : (this._tab = k))}>${label}</button>`)}
+          @click=${() => this._openTab(k)}>${label}</button>`)}
       </nav>
       <main>
         ${this._msg ? html`<p class="status" @click=${() => (this._msg = "")}>${this._msg}</p>` : nothing}
-        ${this._tab === "map" ? this._renderMap()
+        ${this._tab === "live" ? this._renderLive()
+          : this._tab === "map" ? this._renderMap()
           : this._tab === "places" ? this._renderPlaces()
           : this._tab === "import" ? this._renderImport()
           : this._renderSettings()}
@@ -787,6 +1100,20 @@ class FlexibleMapPanel extends LitElement {
       .list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--divider-color); background: var(--card-background-color); }
       .list .muted { display: block; font-size: 13px; }
       code { background: var(--secondary-background-color); padding: 1px 5px; border-radius: 4px; }
+      .tl li.stay, .tl li.trip { cursor: pointer; border-radius: 8px; }
+      .tl li.stay:hover, .tl li.trip:hover { background: var(--secondary-background-color); }
+      .tl .what ha-icon { --mdc-icon-size: 16px; color: var(--c); vertical-align: -2px; }
+      .tl li.trip .what { font-weight: 400; color: var(--secondary-text-color); }
+      .tl .sum { margin: -2px 0 6px 18px; font-size: 13px; }
+      .mini { grid-column: 1 / 3; justify-self: start; padding: 3px 10px; font-size: 12px; border-radius: 8px; border: 1px solid var(--divider-color); background: transparent; margin-top: 3px; }
+      .zrow { display: flex; align-items: center; gap: 10px; }
+      .zrow ha-icon { color: var(--primary-color); }
+      .bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+      .bars li { display: grid; grid-template-columns: minmax(90px, 1fr) 2fr auto; gap: 10px; align-items: center; font-size: 14px; }
+      .bars .bar { height: 10px; border-radius: 5px; background: var(--secondary-background-color); overflow: hidden; }
+      .bars .bar i { display: block; height: 100%; background: var(--primary-color); border-radius: 5px; }
+      .bars .v { color: var(--secondary-text-color); font-size: 13px; font-variant-numeric: tabular-nums; }
+      h3 + .two { margin-top: -2px; }
     `;
   }
 }

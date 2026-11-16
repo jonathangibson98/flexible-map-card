@@ -103,6 +103,15 @@ class LocationStore:
                 out[eid] = [list(r) for r in rows]
         return out
 
+    def points(self, entity_id: str, start: float, end: float) -> list[tuple]:
+        """Every point for one entity, oldest first: (ts, lat, lon, acc)."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT ts, lat, lon, acc FROM points "
+                "WHERE entity_id=? AND ts>=? AND ts<=? ORDER BY ts",
+                (entity_id, start, end),
+            ).fetchall()
+
     def delete_range(self, entity_id: str | None, start: float, end: float) -> int:
         with self._lock:
             before = self._db.total_changes

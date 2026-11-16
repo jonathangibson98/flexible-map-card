@@ -7,10 +7,15 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_HEARTBEAT,
+    CONF_INGEST,
     CONF_MAX_ACCURACY,
     CONF_MIN_DISTANCE,
     CONF_MIN_SECONDS,
     CONF_RETENTION,
+    CONF_SENSORS,
+    CONF_STOP_MINUTES,
+    CONF_STOP_RADIUS,
     CONF_TRACKED,
     CONF_UNITS,
     DOMAIN,
@@ -85,6 +90,11 @@ class FlexibleMapOptionsFlow(OptionsFlow):
                 vol.Optional(CONF_MIN_SECONDS, default=opts[CONF_MIN_SECONDS]): _num(3600, "s"),
                 vol.Optional(CONF_MAX_ACCURACY, default=opts[CONF_MAX_ACCURACY]): _num(5000, "m"),
                 vol.Optional(CONF_RETENTION, default=opts[CONF_RETENTION]): _num(36500, "days"),
+                vol.Optional(CONF_HEARTBEAT, default=opts[CONF_HEARTBEAT]): _num(120, "min"),
+                vol.Optional(CONF_STOP_MINUTES, default=opts[CONF_STOP_MINUTES]): _num(240, "min"),
+                vol.Optional(CONF_STOP_RADIUS, default=opts[CONF_STOP_RADIUS]): _num(1000, "m"),
+                vol.Optional(CONF_SENSORS, default=opts[CONF_SENSORS]): selector.BooleanSelector(),
+                vol.Optional(CONF_INGEST, default=opts[CONF_INGEST]): selector.BooleanSelector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
